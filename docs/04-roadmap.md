@@ -45,7 +45,8 @@ control.
 > M0–M3 are all implemented and tested offline (88 assertions, plus a firmware
 > build whose composition is verified in the shipped bytes). What none of them
 > have is a panel and a norns in the same room. That is the next real step, and
-> [the README's bring-up section](../README.md#bring-up) is written for it.
+> [the install guide's bring-up section](00-install.md#part-3--bring-up) is
+> written for it.
 
 ---
 

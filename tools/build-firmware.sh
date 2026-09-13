@@ -125,5 +125,16 @@ fi
 if [ "${1:-}" = "flash" ]; then
   HOST="${2:-patternflow.local}"
   echo "==> flashing $HOST over OTA"
-  ( cd "$SKETCH" && "$PIO" run -e firmware -t upload --upload-port "$HOST" )
+  # upload_protocol is set explicitly rather than left to PlatformIO's
+  # guess-from-the-port-name heuristic: the core's platformio.ini configures no
+  # protocol at all, and a hostname that fails the heuristic falls back to
+  # serial and reports a confusing "no COM port" instead of an OTA failure.
+  #
+  # If this route gives you trouble, the web console is the reliable one and
+  # needs no toolchain: http://<panel>/update, upload the .bin printed above.
+  ( cd "$SKETCH" \
+    && PLATFORMIO_UPLOAD_PROTOCOL=espota \
+       PLATFORMIO_UPLOAD_PORT="$HOST" \
+       PLATFORMIO_BUILD_DIR="$BUILD_DIR" \
+       "$PIO" run -e firmware -t upload )
 fi

@@ -21,8 +21,9 @@ Three things work, in increasing order of ambition:
 > **Status: written and tested offline, not yet run on hardware.**
 > 88 assertions pass (34 Lua, 54 C++), the firmware builds clean and its
 > composition is verified in the shipped bytes. What has not happened is a
-> panel and a norns in the same room. [Bring-up](#bring-up) is written for
-> exactly that, and says what to check first.
+> panel and a norns in the same room. The install guide's
+> [bring-up section](docs/00-install.md#part-3--bring-up) is written for exactly
+> that, and says what to check first.
 
 ---
 
@@ -60,6 +61,7 @@ changing anything load-bearing.
 
 ```
 docs/
+  00-install.md          step-by-step: build, flash, install, bring up, troubleshoot
   01-verified-facts.md   every load-bearing fact, read out of the source, with citations
   02-wire-protocol.md    the three conversations, the ports, the frame format
   03-architecture.md     mirror vs co-render; where the animation should live
@@ -82,83 +84,34 @@ vendor/
   ndi-mod/               submodule, the capture fallback
 ```
 
-## Setup
+## Install
 
-### 0. Clone
-
-```bash
-git clone --recurse-submodules <this repo>
-# or, in an existing clone:
-git submodule update --init --depth 1
-```
-
-`vendor/patternflow` is about 210 MB even shallow.
-
-### 1. Flash the panel
-
-You need [PlatformIO](https://platformio.org/). The build composes our feature
-onto the vendored core, runs upstream's own boundary checks, builds, and then
-scans the finished image to prove it carries exactly the features it claims:
+**[docs/00-install.md](docs/00-install.md) is the step-by-step guide** — every
+command, both devices, bring-up in an order that isolates failures, and a
+troubleshooting table. Start there. The short version:
 
 ```bash
-tools/build-firmware.sh                        # build
-tools/build-firmware.sh flash patternflow.local  # build and push over OTA
+git clone --recurse-submodules <this repo> && cd patternflow_norns
+pip install platformio
+
+# panel: set Wi-Fi in vendor/patternflow/firmware/patternflow/patternflow_secrets.h
+tools/build-firmware.sh          # then upload the .bin at http://<panel>/update
+
+# norns:
+scp -r src/norns/mod/patternflow we@norns.local:/home/we/dust/code/
+# SYSTEM → MODS → PATTERNFLOW, turn E3 right, then SYSTEM → RESTART
 ```
 
-Set your Wi-Fi first, in
-`vendor/patternflow/firmware/patternflow/patternflow_secrets.h` (copy
-`patternflow_secrets.example.h`). That file is gitignored on both sides —
-`net_config.h` bakes it into the image, so a build made with it carries your
-Wi-Fi password in plaintext. Fine for your own panel; never publish one.
-
-You do **not** need to set `PF_OSC_REMOTE_PORT` there. Our edition's
-`overrides.h` already pins it to 10111, and
-[the reason it must be pinned](docs/01-verified-facts.md#the-osc-feature--ports-vocabulary-and-the-port-gotcha)
-is the least obvious thing in this project.
+Two things that catch people, both covered in the guide: the norns MODS menu
+enables with an **E3 turn** rather than a button press and needs a restart
+afterwards, and the folder must keep the name `patternflow` because norns takes
+the mod's name from its directory.
 
 The edition is the stock **Audio** feature set plus the mirror, so the panel
-keeps its DAW, browser-audio and microphone paths.
-
-### 2. Install the norns mod
-
-```bash
-scp -r src/norns/mod/patternflow we@norns.local:/home/we/dust/code/
-```
-
-Then on norns: **SYSTEM → MODS → patternflow → enable**, and restart.
-
-### 3. Point it at the panel
-
-**SYSTEM → MODS → patternflow** opens a menu with `control`, `mirror`, `fps`,
-`host` and a `re-ping` action. If `patternflow.local` does not resolve from
-norns, set `host` to the panel's IP (the panel's own NETWORK screen shows it).
-E2 selects, E3 changes, K3 toggles or fires, K2 saves and exits.
-
-## Bring-up
-
-In this order, because each step's failure looks different:
-
-1. **The link.** The mod menu header reads `linked` once the panel has sent
-   anything. If it says `no panel`, the panel does not know where norns is or
-   `host` is wrong — try `re-ping`, then an IP instead of `.local`.
-2. **Control.** Turn panel knob 2. It should move whatever norns encoder 2
-   moves. This uses only stock firmware behaviour on both sides, so if the
-   mirror is broken but this works, the problem is in the screencast half.
-3. **The mirror.** It should appear within a second. `curl
-   http://<panel>/api/status` reports `screencast: {live, frames, chunks,
-   dropped}` — `frames` climbing with `dropped` at zero is a healthy link.
-4. **Hue.** Panel knob 4, which is deliberately left unmapped on the norns side.
-   At home position the mirror is plain white; turning right walks the hue
-   circle.
-
-Two things worth knowing when something is odd:
-
-- The mirror yields to the panel's own UI. While a Patternflow menu, the
-  brightness bar or the info screen is up, the pattern comes back — that is
-  `chromeVisible`, and it is intentional.
-- Panel channel 4 is left alone on purpose. Long-pressing encoder 4 is how the
-  panel switches its own patterns, and knob 4 is the hue control. Channels 1–3
-  map to norns.
+keeps its DAW, browser-audio and microphone paths. You do not need to set
+`PF_OSC_REMOTE_PORT` yourself — our `overrides.h` pins it to 10111, and
+[why that is necessary](docs/01-verified-facts.md#the-osc-feature--ports-vocabulary-and-the-port-gotcha)
+is the least obvious thing in this project.
 
 ## Tests
 
