@@ -1,0 +1,12 @@
+[submodule "vendor/patternflow"]
+	path = vendor/patternflow
+	url = https://github.com/engmung/Patternflow.git
+	shallow = true
+[submodule "vendor/norns"]
+	path = vendor/norns
+	url = https://github.com/monome/norns.git
+	shallow = true
+[submodule "vendor/ndi-mod"]
+	path = vendor/ndi-mod
+	url = https://github.com/Dewb/ndi-mod.git
+	shallow = true
