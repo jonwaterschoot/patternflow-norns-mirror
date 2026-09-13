@@ -85,7 +85,7 @@ point — the reflash replaces whatever is there.
 
 **Already have the repo?** Then work in it — there is no separate build or
 test directory, and nothing below wants a clean checkout. Everything this
-project generates lands outside the tree (`~/pf-build`) or is gitignored, and
+project generates lands in the gitignored `build/`, and
 the build leaves `vendor/patternflow` byte-identical to upstream every time.
 Skip to [1.3](#13-install-platformio) once `git submodule status` shows all
 three with no leading `-`.
@@ -121,10 +121,10 @@ virtualenv. `tools/build-firmware.sh` looks there
 `pio` is not on PATH, so you can skip this step. You only need `pio` on PATH if
 you intend to call it directly, which is just the USB recovery route in 1.6.
 
-> **Windows:** build from a path with no non-ASCII characters. The xtensa
-> linker cannot write outputs under a path it cannot encode. Our build script
-> already puts the build tree in `~/pf-build` for this reason; override it with
-> `PF_BUILD_DIR` if that path is also awkward.
+> **A note on non-ASCII paths.** The xtensa linker cannot write outputs under
+> a path it cannot encode, so if this repo lives somewhere with an accent or a
+> non-Latin character in it, the build script notices, says so, and builds in
+> `~/pf-build` instead. Set `PF_BUILD_DIR` to put it anywhere you like.
 
 ## 1.4 Wi-Fi credentials — probably skip this
 
@@ -194,12 +194,21 @@ carries exactly the features it claims, and removes our copies again.
 A clean run ends with:
 
 ```
-==> built: /home/you/pf-build/firmware/firmware.bin (1152384 bytes)
+==> built: /c/Users/you/…/patternflow_norns/build/firmware/firmware.bin (1152384 bytes)
+           C:\Users\you\…\patternflow_norns\build\firmware\firmware.bin
 ==> composition
     ok — osc, screencast, audio, audio_in, midi; nothing else
 ```
 
-First build is a few minutes (toolchain download); after that about 40 seconds.
+**`build/firmware/firmware.bin`, inside this repo** — that is the file you
+upload in the next step. On Windows the second line is the same path in the
+form a file picker wants; the `/c/...` one is Git Bash's spelling of it.
+
+First build is a few minutes (toolchain download); after that about 25 seconds.
+
+Everything the build produces stays in `build/`, which is gitignored:
+`firmware/` for the image and `libdeps/` for the libraries PlatformIO resolved.
+Delete the whole directory to start clean — nothing in it is precious.
 
 Confirm the core was left untouched — this should print nothing:
 
@@ -211,8 +220,11 @@ git -C vendor/patternflow status --porcelain
 
 **Route A — the web console. Recommended, and needs no toolchain.**
 
-Open `http://patternflow.local/update` (or `http://<ip>/update`) and upload the
-`firmware.bin` the build printed. The panel reboots into it.
+Open `http://patternflow.local/update` (or `http://<ip>/update`) and upload
+**`build/firmware/firmware.bin`** from this repo. The panel reboots into it.
+
+The other files beside it — `bootloader.bin`, `partitions.bin`, `firmware.elf`
+— are not what you want here. `/update` takes the application image only.
 
 Uploads are accepted at any time by default. If your build has
 `PF_WEBUPDATE_ALWAYS_ARMED 0`, you must first open the UPDATE screen on the
@@ -418,7 +430,8 @@ always was: long-press K1.
 | `permission denied` running a `.sh` | the execute bit did not survive the clone | `bash tools/build-firmware.sh` |
 | `PlatformIO not found` | `pio` is not on PATH and not in the extension's venv | `pip install platformio` |
 | Build: `Could not find the package with 'lib/WebSockets'` | the vendored libraries were not cloned | the build script does this for you — re-run it rather than calling `pio` directly |
-| Build: linker cannot write output | non-ASCII in the build path (Windows) | set `PF_BUILD_DIR` to a plain path |
+| Build: linker cannot write output | non-ASCII somewhere in the repo path | the script should catch this and say so; if not, set `PF_BUILD_DIR` to a plain path |
+| Build behaves oddly after a submodule bump | stale objects in `build/` | delete `build/` and rebuild |
 | `git -C vendor/patternflow status` is dirty | a build was interrupted before cleanup | `git -C vendor/patternflow checkout .` and `git clean -fd` inside it |
 | Mod does not appear in MODS | wrong path or wrong folder name | it must be `~/dust/code/patternflow/lib/mod.lua` |
 | Mod shows `+` and never loads | the restart has not happened | SYSTEM → RESTART |

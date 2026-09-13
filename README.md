@@ -78,10 +78,14 @@ tools/
   hosttest/              compiles the real feature on a desktop and drives it
   test_mod.lua           drives the real mod against stubbed norns globals
   run_lua_tests.py       runner for the above
+  check_docs.py          every relative link and #anchor in the docs resolves
 vendor/
   patternflow/           submodule, pristine
   norns/                 submodule, API reference
   ndi-mod/               submodule, the capture fallback
+build/                   all build output, gitignored — delete it any time
+  firmware/firmware.bin  the image you flash
+  libdeps/               libraries PlatformIO resolved
 ```
 
 ## Install
@@ -95,7 +99,8 @@ git clone --recurse-submodules <this repo> && cd patternflow_norns
 pip install platformio
 
 # panel: set Wi-Fi in vendor/patternflow/firmware/patternflow/patternflow_secrets.h
-tools/build-firmware.sh          # then upload the .bin at http://<panel>/update
+tools/build-firmware.sh          # → build/firmware/firmware.bin
+                                 # upload that at http://<panel>/update
 
 # norns:
 scp -r src/norns/mod/patternflow we@norns.local:/home/we/dust/code/

@@ -9,15 +9,20 @@ caught.
     python tools/check_docs.py
 
 Anchor slugs follow GitHub's rule closely enough for our headings: lowercase,
-punctuation dropped, whitespace to hyphens. vendor/ is skipped — those are
-other people's docs.
+punctuation dropped, whitespace to hyphens.
+
+Only files git tracks are checked. Walking the tree instead meant deciding by
+hand what to skip, and the list was never finished — vendor/ was excluded but
+build/libdeps/ was not, so the day the build moved inside the repo this tool
+started reporting broken links in a vendored Bluetooth library. Asking git is
+the same question with a maintained answer.
 """
 import os
 import re
+import subprocess
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SKIP = {".git", "vendor", "__pycache__", "node_modules"}
 LINK = re.compile(r"\[([^\]]*)\]\(([^)]+)\)")
 HEADING = re.compile(r"^#{1,6}\s+(.*)$", re.M)
 
@@ -30,14 +35,24 @@ def slug(text):
 
 def main():
     os.chdir(ROOT)
+    try:
+        listing = subprocess.run(
+            ["git", "ls-files", "*.md"],
+            capture_output=True, text=True, check=True,
+        ).stdout.split("\n")
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        sys.exit("not a git checkout, or git is not on PATH")
+
     pages = {}
-    for root, dirs, files in os.walk("."):
-        dirs[:] = [d for d in dirs if d not in SKIP]
-        for fn in files:
-            if fn.endswith(".md"):
-                p = os.path.normpath(os.path.join(root, fn))
-                text = open(p, encoding="utf-8").read()
-                pages[p] = (text, {slug(m.group(1)) for m in HEADING.finditer(text)})
+    for rel in listing:
+        rel = rel.strip()
+        if not rel:
+            continue
+        p = os.path.normpath(rel)
+        if not os.path.exists(p):   # tracked but deleted in the working tree
+            continue
+        text = open(p, encoding="utf-8").read()
+        pages[p] = (text, {slug(m.group(1)) for m in HEADING.finditer(text)})
 
     problems = 0
     for page, (text, _) in sorted(pages.items()):

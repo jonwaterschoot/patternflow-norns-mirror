@@ -30,10 +30,27 @@ if [ ! -d "$SKETCH" ]; then
   exit 1
 fi
 
-# xtensa's linker cannot open output files under a path containing non-ASCII,
-# and upstream's build.sh works around the same thing. Keep ours somewhere
-# plain for the same reason.
-BUILD_DIR="${PF_BUILD_DIR:-$HOME/pf-build}"
+# Everything the build produces goes in ./build, so it sits next to the source
+# that made it, `git clean` reaches it, and nothing is left in the submodule.
+#
+# Upstream puts theirs outside the repo because xtensa's linker cannot open
+# output files under a path containing non-ASCII, and their repository lives
+# under one. That is a property of the path, not of the project — so check the
+# path rather than inherit the workaround, and only step outside when we have
+# to. A build that silently fails to link is a bad way to learn this.
+if [ -n "${PF_BUILD_DIR:-}" ]; then
+  BUILD_DIR="$PF_BUILD_DIR"
+elif LC_ALL=C grep -q '[^ -~]' <<< "$PWD"; then
+  # LC_ALL=C matters: it makes grep see UTF-8 multibyte characters as
+  # individual high bytes, which [^ -~] then catches. Under a UTF-8 locale
+  # the same expression passes them silently. [[:ascii:]] is not portable.
+  BUILD_DIR="$HOME/pf-build"
+  echo "NOTE: this path contains non-ASCII characters, which the xtensa linker"
+  echo "      cannot write under. Building in $BUILD_DIR instead."
+  echo "      Set PF_BUILD_DIR to choose somewhere else."
+else
+  BUILD_DIR="$PWD/build"
+fi
 
 SECRETS="$SKETCH/patternflow_secrets.h"
 COPIED_SECRETS=0
@@ -118,11 +135,30 @@ for pair in \
 done
 
 echo "==> building"
-( cd "$SKETCH" && PLATFORMIO_BUILD_DIR="$BUILD_DIR" "$PIO" run -e firmware )
+# Both directories are set, not just BUILD_DIR, so the resolved libraries land
+# under ./build too instead of being left inside vendor/patternflow — the
+# submodule then stays clean on the filesystem and not merely in git's eyes.
+#
+# These two rather than WORKSPACE_DIR, which relocates the whole .pio tree but
+# keeps its internal layout and would give ./build/build/firmware/firmware.bin.
+( cd "$SKETCH" \
+  && PLATFORMIO_BUILD_DIR="$BUILD_DIR" \
+     PLATFORMIO_LIBDEPS_DIR="$BUILD_DIR/libdeps" \
+     "$PIO" run -e firmware )
 
 BIN="$BUILD_DIR/firmware/firmware.bin"
 [ -f "$BIN" ] || BIN="$SKETCH/.pio/build/firmware/firmware.bin"
+if [ ! -f "$BIN" ]; then
+  echo "built, but the .bin is not where any of the expected paths say" >&2
+  exit 1
+fi
 echo "==> built: $BIN ($(stat -c%s "$BIN" 2>/dev/null || echo '?') bytes)"
+# The web console at http://<panel>/update is the recommended way to install
+# this, and a file picker wants a native path — which on Windows is not the
+# /c/... form the rest of this output uses.
+if command -v cygpath >/dev/null 2>&1; then
+  echo "           $(cygpath -w "$BIN")"
+fi
 
 # Prove the image carries exactly the features we asked for, by scanning the
 # shipped bytes for one marker string per feature. This is upstream's own
@@ -171,5 +207,6 @@ if [ "${1:-}" = "flash" ]; then
     && PLATFORMIO_UPLOAD_PROTOCOL=espota \
        PLATFORMIO_UPLOAD_PORT="$HOST" \
        PLATFORMIO_BUILD_DIR="$BUILD_DIR" \
+       PLATFORMIO_LIBDEPS_DIR="$BUILD_DIR/libdeps" \
        "$PIO" run -e firmware -t upload )
 fi
