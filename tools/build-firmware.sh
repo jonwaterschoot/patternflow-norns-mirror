@@ -82,9 +82,21 @@ if [ "${1:-}" = "checks" ]; then
   exit 0
 fi
 
+# The PlatformIO VS Code extension installs into its own virtualenv and does
+# not put pio on PATH, which is the usual reason this is not found. Look there
+# before giving up — Windows and POSIX layouts differ.
 PIO="$(command -v pio || true)"
-[ -n "$PIO" ] || PIO="$HOME/.platformio/penv/Scripts/pio.exe"
-[ -x "$PIO" ] || { echo "PlatformIO not found — install it, or put pio on PATH" >&2; exit 1; }
+for c in "$HOME/.platformio/penv/Scripts/pio.exe" \
+         "$HOME/.platformio/penv/bin/pio"; do
+  [ -n "$PIO" ] && break
+  [ -x "$c" ] && PIO="$c"
+done
+if [ -z "$PIO" ] || [ ! -x "$PIO" ]; then
+  echo "PlatformIO not found. Either:" >&2
+  echo "  pip install platformio" >&2
+  echo "  or install the PlatformIO VS Code extension and re-run this" >&2
+  exit 1
+fi
 
 # The four libraries upstream vendors into lib/ have to exist before
 # PlatformIO resolves lib_deps, which happens before any extra script runs —

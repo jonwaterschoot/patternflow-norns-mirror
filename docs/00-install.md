@@ -32,6 +32,31 @@ download.
 You do **not** need: a soldering iron, a USB cable (unless something goes
 wrong), an Arduino IDE, or a norns fork.
 
+## Which terminal
+
+**Every command block below is a POSIX shell command**, run from the root of
+this repo. That matters on Windows.
+
+- **macOS / Linux:** any terminal. Nothing special.
+- **Windows: use Git Bash, not PowerShell and not cmd.** `tools/*.sh` are bash
+  scripts, and `cp`, `scp` and `curl` behave differently or not at all in
+  PowerShell.
+
+Git Bash ships with Git for Windows, so if you can run `git` you already have
+it. In VS Code, open the terminal (`` Ctrl+` ``), click the **∨** next to the
+`+` on the terminal tab bar, and pick **Git Bash**. To make it the default:
+`Ctrl+Shift+P` → *Terminal: Select Default Profile* → *Git Bash*.
+
+To run one command from a PowerShell prompt without switching:
+
+```powershell
+& "C:\Program Files\Git\bin\bash.exe" tools/build-firmware.sh
+```
+
+Two things that look wrong in Git Bash and are not: paths print as
+`/c/Users/you/...` rather than `C:\Users\you\...` (same place, different
+spelling), and `~` is your Windows user folder.
+
 ---
 
 # Part 1 — the panel
@@ -89,6 +114,13 @@ pip install platformio
 That is the whole dependency. The ESP32-S3 toolchain (a few hundred MB)
 downloads by itself on the first build.
 
+**Already have the PlatformIO VS Code extension?** Then you have it, even
+though `pio` is probably not on your PATH — the extension keeps it in its own
+virtualenv. `tools/build-firmware.sh` looks there
+(`~/.platformio/penv/Scripts/pio.exe`, or `bin/pio` on macOS and Linux) when
+`pio` is not on PATH, so you can skip this step. You only need `pio` on PATH if
+you intend to call it directly, which is just the USB recovery route in 1.6.
+
 > **Windows:** build from a path with no non-ASCII characters. The xtensa
 > linker cannot write outputs under a path it cannot encode. Our build script
 > already puts the build tree in `~/pf-build` for this reason; override it with
@@ -139,8 +171,19 @@ which is the single most important setting in this project and
 
 ## 1.5 Build
 
+From the **root of this repo**, in a [POSIX shell](#which-terminal) — on
+Windows that means Git Bash:
+
 ```bash
+cd /c/Users/you/Documents/GitHub/patternflow_norns   # wherever you cloned it
 tools/build-firmware.sh
+```
+
+If it says `permission denied`, the execute bit did not survive the clone. Run
+it through bash instead — same result:
+
+```bash
+bash tools/build-firmware.sh
 ```
 
 What it does, in order: copies our feature and our two composition files onto
@@ -371,6 +414,9 @@ always was: long-press K1.
 
 | symptom | likely cause | fix |
 |---|---|---|
+| `tools/build-firmware.sh : The term ... is not recognized` | you are in PowerShell | use Git Bash — see [Which terminal](#which-terminal) |
+| `permission denied` running a `.sh` | the execute bit did not survive the clone | `bash tools/build-firmware.sh` |
+| `PlatformIO not found` | `pio` is not on PATH and not in the extension's venv | `pip install platformio` |
 | Build: `Could not find the package with 'lib/WebSockets'` | the vendored libraries were not cloned | the build script does this for you — re-run it rather than calling `pio` directly |
 | Build: linker cannot write output | non-ASCII in the build path (Windows) | set `PF_BUILD_DIR` to a plain path |
 | `git -C vendor/patternflow status` is dirty | a build was interrupted before cleanup | `git -C vendor/patternflow checkout .` and `git clean -fd` inside it |
