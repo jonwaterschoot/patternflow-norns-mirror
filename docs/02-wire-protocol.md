@@ -126,6 +126,23 @@ half-size. If the mirror ever needs the bandwidth, the honest fix is a
 different address with a binary payload rather than a string that lies about
 being ASCII.
 
+### One cost to watch during bring-up
+
+`matron`'s `osc_send` builds a fresh `lo_address` for every call and frees it
+after (`matron/src/osc.cc`). liblo creates the UDP socket lazily on first send
+against an address and closes it when the address is freed, so **each
+`osc.send` is likely to be its own socket open, sendto and close** rather than
+a write to a shared one. That is not verified against liblo's sources here — it
+is inferred from the matron side — so treat it as a suspect rather than a fact.
+
+It matters because a full-screen animation at 20 fps is 8 datagrams a frame,
+160 a second. The dirty-chunk check means real screens rarely reach that, but
+if the mirror turns out to cost more norns CPU than expected, this is the first
+place to look, and dropping `fps` in the mod menu is the first thing to try.
+The structural fix, if it ever comes to that, is the Path 2 capture in
+[05-prior-art.md](05-prior-art.md) — a native sender with one socket of its
+own — which does not change a byte of this protocol.
+
 ### Liveness
 
 `/pf/scr/ping` goes out four times a second whenever the mirror is on, whether
