@@ -35,10 +35,17 @@ fi
 # plain for the same reason.
 BUILD_DIR="${PF_BUILD_DIR:-$HOME/pf-build}"
 
+SECRETS="$SKETCH/patternflow_secrets.h"
+COPIED_SECRETS=0
+
 cleanup() {
   rm -rf "$FEATURES/screencast" \
          "$FEATURES/features_local.h" \
          "$FEATURES/overrides.h"
+  # Only remove the secrets file if WE put it there. Somebody who keeps theirs
+  # inside the submodule the upstream way should not have it deleted by a build.
+  [ "$COPIED_SECRETS" = 1 ] && rm -f "$SECRETS"
+  return 0
 }
 trap cleanup EXIT
 
@@ -46,6 +53,22 @@ echo "==> composing"
 cp -r src/patternflow/features/screencast "$FEATURES/"
 cp "$BUNDLE/features_local.h" "$FEATURES/"
 cp "$BUNDLE/overrides.h"      "$FEATURES/"
+
+# Your Wi-Fi credentials belong in THIS repo's root, not inside the submodule.
+# vendor/patternflow is a disposable checkout — a submodule bump, a re-init or a
+# `git clean -fdx` in there is a normal thing to do and would take the file with
+# it. Keeping it here means the one file you had to write by hand survives all
+# of that, and it is gitignored on this side too.
+#
+# A file already inside the sketch still wins, so an existing upstream-style
+# setup keeps working untouched.
+if [ -f patternflow_secrets.h ] && [ ! -f "$SECRETS" ]; then
+  cp patternflow_secrets.h "$SECRETS"
+  COPIED_SECRETS=1
+  echo "    using ./patternflow_secrets.h"
+elif [ -f patternflow_secrets.h ] && [ -f "$SECRETS" ]; then
+  echo "    NOTE: ignoring ./patternflow_secrets.h — the submodule already has one"
+fi
 
 echo "==> upstream checks"
 # check_boundaries is the one that matters to us: it fails if any CORE file

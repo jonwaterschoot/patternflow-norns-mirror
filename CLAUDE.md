@@ -29,6 +29,7 @@ subtly wrong:
 python tools/run_lua_tests.py    # the mod, against stubbed norns globals
 bash tools/hosttest/run.sh       # the real feature, compiled and driven on the desktop
 bash tools/build-firmware.sh     # builds, and scans the image for its composition
+python tools/check_docs.py       # every relative link and #anchor resolves
 ```
 
 ## Things that will bite you

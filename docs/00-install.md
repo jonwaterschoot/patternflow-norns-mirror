@@ -58,6 +58,13 @@ point — the reflash replaces whatever is there.
 
 ## 1.2 Clone this repo with its submodules
 
+**Already have the repo?** Then work in it — there is no separate build or
+test directory, and nothing below wants a clean checkout. Everything this
+project generates lands outside the tree (`~/pf-build`) or is gitignored, and
+the build leaves `vendor/patternflow` byte-identical to upstream every time.
+Skip to [1.3](#13-install-platformio) once `git submodule status` shows all
+three with no leading `-`.
+
 ```bash
 git clone --recurse-submodules https://github.com/<you>/patternflow_norns
 cd patternflow_norns
@@ -87,30 +94,48 @@ downloads by itself on the first build.
 > already puts the build tree in `~/pf-build` for this reason; override it with
 > `PF_BUILD_DIR` if that path is also awkward.
 
-## 1.4 Set your Wi-Fi credentials
+## 1.4 Wi-Fi credentials — probably skip this
+
+**If your panel is already on your Wi-Fi, do nothing here.** Credentials
+provisioned through the browser flasher or Improv live in a separate NVS
+partition, `core_wifi.h` prefers them over anything compiled in, and a firmware
+update does not erase them. The panel will come back on the same network. It
+remembers up to five.
+
+You only need a secrets file if the panel has *never* been on this Wi-Fi and
+you would rather bake the credentials in than provision over USB.
+
+If you do need one, put it at **the root of this repo** — not in the submodule:
 
 ```bash
-cd vendor/patternflow/firmware/patternflow
-cp patternflow_secrets.example.h patternflow_secrets.h
-cd -
+cp vendor/patternflow/firmware/patternflow/patternflow_secrets.example.h \
+   ./patternflow_secrets.h
 ```
 
-Edit `patternflow_secrets.h` and set:
+and set just these two lines:
 
 ```c
 #define PF_WIFI_SSID "your-wifi-name"
 #define PF_WIFI_PASS "your-wifi-password"
 ```
 
+`tools/build-firmware.sh` copies it into the sketch for the build and removes
+it again afterwards, exactly like it does with the feature. Keeping it here
+rather than in `vendor/patternflow` matters because that checkout is
+disposable — bumping the submodule, re-initialising it, or a `git clean -fdx`
+in there are all normal things to do, and any of them would take the one file
+you wrote by hand with it. A file already inside the submodule still wins, so
+an existing upstream-style setup keeps working.
+
 Leave everything else commented out. In particular **do not set
 `PF_OSC_REMOTE_PORT`** — our edition's `overrides.h` already pins it to 10111,
 which is the single most important setting in this project and
 [the reason is worth reading](01-verified-facts.md#the-osc-feature--ports-vocabulary-and-the-port-gotcha).
 
-> `patternflow_secrets.h` is gitignored in both repos, because `net_config.h`
-> bakes it straight into the image: **a firmware built with this file contains
-> your Wi-Fi password in plaintext.** Fine for your own panel. Never publish
-> one. The build prints a reminder when it detects the file.
+> The file is gitignored on both sides, because `net_config.h` bakes it
+> straight into the image: **a firmware built with it contains your Wi-Fi
+> password in plaintext.** Fine for your own panel. Never publish one. The
+> build prints a reminder whenever it used one.
 
 ## 1.5 Build
 

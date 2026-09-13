@@ -119,6 +119,7 @@ is the least obvious thing in this project.
 python tools/run_lua_tests.py    # 34 assertions: the mod, against stubbed norns
 bash tools/hosttest/run.sh       # 54 assertions: the real feature, on the desktop
 bash tools/build-firmware.sh     # builds, and proves the composition
+python tools/check_docs.py       # every relative link and #anchor resolves
 ```
 
 The host test needs a compiler that can link something this machine can run. It
