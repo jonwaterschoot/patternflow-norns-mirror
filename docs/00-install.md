@@ -348,8 +348,9 @@ register — check `maiden`'s REPL output for a Lua error.
 | `mirror` | the norns screen is sent to the panel |
 | `fps` | mirror rate cap, 1–40. 20 is the default; lower it first if norns feels loaded |
 | `host` | the panel: `patternflow.local`, or its IP |
+| `test` | `off` / `diag` / `rows` / `line` — see [Diagnosing a display fault](#diagnosing-a-display-fault) |
+| `line y` | which row the `line` card lights, 0–63 |
 | `re-ping` | send the handshake again now |
-| `test card` | send a one-pixel diagonal that crosses every row exactly once, with faint bars at the chunk boundaries. Any row that is duplicated, dropped or shifted shows as a step in an otherwise straight line |
 
 **E2** selects a row, **E3** changes it, **K3** toggles or fires an action,
 **K2** saves and exits.
@@ -423,6 +424,55 @@ always was: long-press K1.
 
 ---
 
+## Diagnosing a display fault
+
+If the mirror is up but the picture is wrong — a row doubled, shifted or
+missing — the first question is whether the bad pixels *arrived* that way or
+were *drawn* that way. The mod's test cards and the panel's `/api/status`
+answer it from opposite ends, and between them there is nowhere for the fault
+to hide.
+
+The cards are a **mode**, not a one-shot: while one is selected the mirror
+sends it instead of the norns screen, so it stays on the panel while you walk
+around the menus looking at it.
+
+**SYSTEM → MODS → PATTERNFLOW → K3**, then the `test` row:
+
+| card | what it shows | what it proves |
+|---|---|---|
+| `diag` | a one-pixel diagonal crossing every row exactly once, plus faint bars every 16 rows at the chunk boundaries | a row that is duplicated, dropped or shifted is a visible step in an otherwise straight line. The bars show whether a fault sits on a chunk edge |
+| `rows` | every other row lit | adjacent rows are **never** equal by construction. If the panel shows solid bands or paired rows, the doubling happened after the data |
+| `line` | a single lit row, moved with `line y` | move it and watch. If the doubling follows it everywhere, it is systematic; if it only happens at one position, it is specific to those rows |
+
+Then ask the panel what it thinks it has:
+
+```bash
+curl http://patternflow.local/api/status
+```
+
+`screencast.rowdup` counts how many adjacent row pairs are byte-identical in
+the buffer the panel is about to draw, and `rowdupfirst` is the first such row.
+
+**With the `rows` card selected, `rowdup` must be 0.** So:
+
+- `rowdup: 0` and you can still see doubling → the data arrived correct and
+  something downstream of it doubled the row: the blit, the HUB75 driver, or
+  the panel. Nothing in this project can cause that.
+- `rowdup` greater than 0 with the `rows` card up → the duplication is in the
+  data, and `rowdupfirst` says where. That is ours, and worth reporting.
+
+A blank screen legitimately reports `rowdup: 63` — every row matches its
+neighbour because they are all black. The number only means something against
+a card that makes neighbours differ.
+
+### What a dead pixel cannot do
+
+A physically dead LED is one pixel that never lights. It cannot make a row
+appear twice: row addressing happens before any individual LED is driven, and
+a dead emitter has no way to reach back and change which row data is latched
+into. If a dead pixel were somehow involved you would see a *hole*, always in
+the same place, not a repeat. Rule it out and look at the row mapping.
+
 ## Troubleshooting
 
 | symptom | likely cause | fix |
@@ -443,7 +493,8 @@ always was: long-press K1.
 | Mirror freezes, then the pattern returns | keepalives stopped arriving | norns busy, or Wi-Fi dropped. The panel is *supposed* to hand itself back |
 | The pattern keeps coming back whenever norns is idle | the heartbeat is not running | a mod older than the reserved-metro fix; or another mod took metro `metro_id` (35). Both halves must be updated together |
 | Frames visibly fill in top to bottom | mod and firmware are out of step | `/pf/scr/end` is what publishes a frame; a mod without it, or a firmware without it, tears. Re-copy the mod and reflash |
-| Rows look duplicated or shifted | worth isolating | run **test card** from the mod menu: it draws a one-pixel diagonal crossing every row exactly once, with faint bars at the chunk boundaries. A clean straight line means the mapping is right and what you saw was tearing |
+| Rows look duplicated or shifted | worth isolating | [Diagnosing a display fault](#diagnosing-a-display-fault) — the test cards and `rowdup` together say whether the data or the panel is at fault |
+| A test card flashes up and disappears | a mod older than the test-*mode* change | the cards are a mode now and hold until set back to `off`. Re-copy the mod |
 | Mirror vanishes while you use the panel's menus | working as intended | the mirror yields while the panel's own UI is up (`chromeVisible`) |
 | norns audio glitches while mirroring | the Lua mirror is costing too much | lower `fps`; see [the note on per-send cost](02-wire-protocol.md#the-cost-that-shapes-all-of-this) |
 | Panel switches patterns on its own | something is sending `/patternflow/pattern/index` | another OSC host on the network found it |

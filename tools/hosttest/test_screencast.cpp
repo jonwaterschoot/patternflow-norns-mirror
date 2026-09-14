@@ -349,6 +349,41 @@ int main() {
     g_blackIndex = 3;
   }
 
+  printf("\nrow-duplication diagnostic\n");
+  {
+    int count = -1, first = -1;
+
+    // The `rows` test card: alternate rows lit. No two neighbours can be
+    // equal, so this must find nothing — which is what makes it able to prove
+    // that doubling seen on the panel happened after the data arrived.
+    for (int y = 0; y < SC::SRC_H; y++) {
+      memset(SC::levels + (size_t)y * SC::SRC_W, (y % 2) ? 0 : 7, SC::SRC_W);
+    }
+    SC::rowDupStats(&count, &first);
+    ok(count == 0, "alternating rows report no duplicate pairs");
+    ok(first == -1, "and no first-duplicate row");
+
+    // Genuinely duplicate one row and it has to be found, at the right index.
+    // The base is y % 8 rather than the alternating card: copying row 5 over
+    // row 6 there would also make 6 match 7, and the test would be asserting
+    // on two duplicate pairs while claiming to make one.
+    for (int y = 0; y < SC::SRC_H; y++) {
+      memset(SC::levels + (size_t)y * SC::SRC_W, y % 8, SC::SRC_W);
+    }
+    SC::rowDupStats(&count, &first);
+    ok(count == 0, "a ramp with no equal neighbours reports none");
+    memcpy(SC::levels + 6 * SC::SRC_W, SC::levels + 5 * SC::SRC_W, SC::SRC_W);
+    SC::rowDupStats(&count, &first);
+    ok(count == 1, "a duplicated row is counted");
+    ok(first == 5, "and reported at the first row of the pair");
+
+    // An all-black screen is 63 identical pairs, which is correct, not a fault.
+    memset(SC::levels, 0, SC::SRC_PX);
+    SC::rowDupStats(&count, &first);
+    ok(count == SC::SRC_H - 1, "a blank screen is all-duplicate, as it should be");
+    ok(first == 0, "starting at row 0");
+  }
+
   printf("\nstatus json\n");
   {
     String json;

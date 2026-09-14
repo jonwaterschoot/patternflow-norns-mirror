@@ -246,27 +246,144 @@ n = 0
 for _, s in ipairs(sent) do if s.path == "/pf/scr" then n = n + 1 end end
 T.eq(n, 0, "a frame arriving inside the fps period is dropped")
 
--- the test card: a diagonal that crosses every row exactly once
-print("\ntest card")
-sent = {}
-pf.send_test_card()
-local card = {}
-for _, s in ipairs(sent) do
-  if s.path == "/pf/scr" then card[s.args[1]] = decode(s.args[3]) end
+-- ── test cards ──────────────────────────────────────────────────────────
+--
+-- These are a mode, not a one-shot. The first version sent a single frame and
+-- the very next menu redraw replaced it with the real screen, so it flashed up
+-- and vanished — which is no use for staring at a panel.
+
+print("\ntest cards")
+
+-- Rebuild the whole 64x128 image from the chunks of one frame.
+local function capture_image()
+  local rows = {}
+  for _, s in ipairs(sent) do
+    if s.path == "/pf/scr" then
+      local c, px = s.args[1], decode(s.args[3])
+      for i, v in ipairs(px) do
+        local abs = c * 2048 + i - 1
+        local y, x = math.floor(abs / 128), abs % 128
+        rows[y] = rows[y] or {}
+        rows[y][x] = v
+      end
+    end
+  end
+  return rows
 end
-T.eq(#sent, 5, "the test card is 4 chunks and a frame-complete")
+
+local menu = pf.menu
+
+local function sel_to(label)
+  for i, it in ipairs(pf.items) do
+    if it.label == label then return i end
+  end
+end
+
+local function select_test(mode_name)
+  -- walk the menu's `test` row to the named mode, the way a hand would
+  pf.select(sel_to("test"))
+  for _ = 1, #TEST_MODE_NAMES do
+    if pf.test_mode_name() == mode_name then return end
+    menu.enc(3, 1)
+  end
+  for _ = 1, #TEST_MODE_NAMES do
+    if pf.test_mode_name() == mode_name then return end
+    menu.enc(3, -1)
+  end
+end
+
+TEST_MODE_NAMES = { "off", "diag", "rows", "line" }
+
+select_test("diag")
+T.eq(pf.test_mode_name(), "diag", "the test row selects the diagonal card")
+
+sent = {}
+clock_now = 200
+screen.update_default()
+local img = capture_image()
 local diag_ok, band_ok = true, true
 for y = 0, 63 do
-  local c = math.floor(y / 16)
-  local within = (y % 16) * 128
-  local row = card[c]
-  if not row then diag_ok = false break end
-  if row[within + ((y * 2) % 128) + 1] ~= 7 then diag_ok = false end
-  -- x=1, not x=0: at y=0 the diagonal sits on x=0 and would mask the band.
-  if y % 16 == 0 and row[within + 2] ~= 1 then band_ok = false end
+  if not img[y] then diag_ok = false break end
+  if img[y][(y * 2) % 128] ~= 7 then diag_ok = false end
+  -- x=1, not x=0: at y=0 the diagonal sits on x=0 and would mask the bar.
+  if y % 16 == 0 and img[y][1] ~= 1 then band_ok = false end
 end
-T.ok(diag_ok, "every row of the test card carries its diagonal pixel")
+T.ok(diag_ok, "every row carries its diagonal pixel")
 T.ok(band_ok, "and each chunk boundary is marked")
+
+-- It PERSISTS. This is the bug being fixed: the card used to be one frame, and
+-- the very next menu redraw sent the real screen over the top of it. Turning
+-- the whole screen white and redrawing must now change nothing on the wire —
+-- the card has not changed, so the dirty-chunk check sends no chunks at all.
+screen_buf = string.rep(string.char(15), 128 * 64)
+sent = {}
+clock_now = 200.2
+screen.update_default()
+local chunks_sent = 0
+for _, s in ipairs(sent) do if s.path == "/pf/scr" then chunks_sent = chunks_sent + 1 end end
+T.eq(chunks_sent, 0, "a redraw of the real screen sends nothing while a card is up")
+T.eq(sent[#sent] and sent[#sent].path, "/pf/scr/end",
+     "and the card is still held up by the frame-complete beat")
+
+-- and the card, not the screen, is what a forced refresh re-sends
+clock_now = 203.0
+sent = {}
+screen.update_default()
+img = capture_image()
+T.ok(img[1] ~= nil and img[1][2] == 7, "the full refresh re-sends the card, not the screen")
+
+-- `rows`: alternate rows lit, so no two neighbours are ever equal
+select_test("rows")
+sent = {}
+clock_now = 203.2
+screen.update_default()
+img = capture_image()
+local alt_ok, neighbours_differ = true, true
+for y = 0, 63 do
+  local want = (y % 2 == 0) and 7 or 0
+  for x = 0, 127 do if img[y][x] ~= want then alt_ok = false end end
+end
+for y = 0, 62 do
+  local same = true
+  for x = 0, 127 do if img[y][x] ~= img[y + 1][x] then same = false break end end
+  if same then neighbours_differ = false end
+end
+T.ok(alt_ok, "the rows card lights every other row")
+T.ok(neighbours_differ,
+     "no two adjacent rows are equal — so any doubling seen on the panel is the panel")
+
+-- `line`: one row, movable
+select_test("line")
+pf.select(sel_to("line y"))
+sent = {}
+clock_now = 203.4
+screen.update_default()
+img = capture_image()
+local lit = {}
+for y = 0, 63 do if img[y][64] == 7 then lit[#lit + 1] = y end end
+T.eq(#lit, 1, "the line card lights exactly one row")
+T.eq(lit[1], 5, "and starts on row 5, the reported one")
+
+menu.enc(3, 9)            -- move it down
+sent = {}
+clock_now = 203.6
+screen.update_default()
+img = capture_image()
+lit = {}
+for y = 0, 63 do if img[y][64] == 7 then lit[#lit + 1] = y end end
+T.eq(#lit, 1, "still exactly one row after moving it")
+T.eq(lit[1], 14, "and it moved where it was told")
+
+-- back to off, and the real screen returns
+select_test("off")
+screen_buf = string.rep(string.char(0), 128 * 64)
+sent = {}
+clock_now = 203.8
+screen.update_default()
+img = capture_image()
+local all_black = true
+for y = 0, 63 do for x = 0, 127 do if img[y][x] ~= 0 then all_black = false end end end
+T.ok(all_black, "switching the card off returns to mirroring the real screen")
 
 -- ── OSC routing ─────────────────────────────────────────────────────────
 

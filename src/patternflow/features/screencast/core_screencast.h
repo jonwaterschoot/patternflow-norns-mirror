@@ -436,7 +436,32 @@ inline void setRuntimeEnabled(bool on) {
   saveSettings();
 }
 
+// How many adjacent row pairs are byte-identical in the buffer about to be
+// drawn, and the first such row. This exists to settle one question: when the
+// panel shows a row twice, did it arrive twice?
+//
+// Point the mod's `rows` test card at it — alternate rows lit, so no two
+// neighbours can be equal — and read this back. Zero here with visible
+// doubling on the panel means the data is right and the doubling happened
+// downstream, in the blit or the panel itself. Non-zero means it is ours.
+//
+// 63 comparisons of 128 bytes, only when somebody asks for /api/status.
+inline void rowDupStats(int* count, int* first) {
+  *count = 0;
+  *first = -1;
+  if (!levels) return;
+  for (int y = 0; y + 1 < SRC_H; y++) {
+    if (memcmp(levels + (size_t)y * SRC_W, levels + (size_t)(y + 1) * SRC_W,
+               SRC_W) == 0) {
+      if (*first < 0) *first = y;
+      (*count)++;
+    }
+  }
+}
+
 inline void appendStatus(String& json) {
+  int dupCount, dupFirst;
+  rowDupStats(&dupCount, &dupFirst);
   json += ",\"screencast\":{\"on\":";
   json += runtimeEnabled ? "true" : "false";
   json += ",\"live\":";
@@ -451,6 +476,10 @@ inline void appendStatus(String& json) {
   json += chunksSeen;
   json += ",\"dropped\":";
   json += dropped;
+  json += ",\"rowdup\":";
+  json += dupCount;
+  json += ",\"rowdupfirst\":";
+  json += dupFirst;
   json += "}";
 }
 

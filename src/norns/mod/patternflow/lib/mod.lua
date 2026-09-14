@@ -145,15 +145,91 @@ local function send_frame(chars, force)
   frame_end()
 end
 
+-- ── Test cards ───────────────────────────────────────────────────────────
+--
+-- For telling a data fault apart from a display fault. They are a MODE, not a
+-- one-shot: while one is selected the mirror sends it instead of the screen,
+-- so it stays up while you walk around the menus looking at the panel. The
+-- first version sent one frame and the very next menu redraw replaced it.
+--
+--   diag   a one-pixel diagonal crossing every row exactly once, with faint
+--          bars every 16 rows at the chunk boundaries. A row that is
+--          duplicated, dropped or shifted is a visible step in a straight line.
+--   rows   alternate rows lit. Adjacent rows are never equal by construction,
+--          so if the panel shows solid bands or pairs, the doubling is
+--          happening after the data — in the driver or the panel, not here.
+--   line   one lit row, position set by `line y` in the menu. Move it and
+--          watch whether the doubling follows: at every position it is
+--          systematic, at one position it is specific to those rows.
+--
+-- The panel side answers the same question from the other end: /api/status
+-- reports `rowdup`, how many adjacent row pairs are byte-identical in the
+-- buffer it is about to draw. With `rows` selected that must be 0. If it is 0
+-- and you can still see doubling, the data arrived correct and the panel is
+-- what doubled it.
+
+local TEST_MODES = { "off", "diag", "rows", "line" }
+local test_mode = 1      -- index into TEST_MODES
+local test_line = 5      -- the row `line` lights; 5 by default, the reported one
+local test_chars = nil
+
+local function build_test_chars()
+  if TEST_MODES[test_mode] == "off" then test_chars = nil return end
+  local px = {}
+  local mode = TEST_MODES[test_mode]
+  for y = 0, H - 1 do
+    local fill = 0
+    if mode == "rows" then
+      fill = (y % 2 == 0) and 15 or 0
+    elseif mode == "line" then
+      fill = (y == test_line) and 15 or 0
+    elseif mode == "diag" then
+      fill = (y % 16 == 0) and 2 or 0
+    end
+    local row = string.rep(string.char(fill), W)
+    if mode == "diag" then
+      local x = (y * 2) % W
+      row = row:sub(1, x) .. string.char(15) .. row:sub(x + 2)
+    end
+    px[y + 1] = row
+  end
+  test_chars = (table.concat(px):gsub("..", xlat2))
+end
+
+local function test_card_active()
+  return TEST_MODES[test_mode] ~= "off"
+end
+local warned_length = false
+
 local function mirror_frame()
   local now = util.time()
   if now - last_send < frame_period then return end
   last_send = now
 
-  local ok, buf = pcall(screen.peek, 0, 0, W, H)
-  if not ok or type(buf) ~= "string" or #buf < W * H then return end
+  local chars
+  if test_card_active() then
+    if not test_chars then build_test_chars() end
+    chars = test_chars
+  else
+    local ok, buf = pcall(screen.peek, 0, 0, W, H)
+    if not ok or type(buf) ~= "string" or #buf < W * H then return end
+    chars = (buf:gsub("..", xlat2))
+  end
+  if not chars then return end
 
-  local chars = buf:gsub("..", xlat2)
+  -- gsub leaves a match alone when the table has no entry for it, which would
+  -- silently lengthen the payload and get every chunk rejected at the far end.
+  -- xlat2 covers all 256 pairs and screen_peek masks to 0-15, so this cannot
+  -- happen — but it is the one failure that would look like a dead mirror with
+  -- no error anywhere, so it says so once rather than never.
+  if #chars ~= (W * H) / 2 then
+    if not warned_length then
+      warned_length = true
+      print("patternflow: encoded frame is " .. #chars .. " chars, expected " ..
+            (W * H) / 2 .. " — the panel will reject these")
+    end
+    return
+  end
 
   local force = (now - last_full) >= FULL_REFRESH_S
   if force then last_full = now end
@@ -161,24 +237,6 @@ local function mirror_frame()
   send_frame(chars, force)
 end
 
--- A test card, for when the mirror is up but something about it looks wrong.
--- A one-pixel diagonal is the point: it crosses every row exactly once, so a
--- row that is duplicated, dropped or shifted shows up as a visible step in an
--- otherwise straight line. The faint bars every 16 rows mark the chunk
--- boundaries, which is where a chunking bug would land.
-local function send_test_card()
-  local px = {}
-  for y = 0, H - 1 do
-    local band = (y % 16 == 0) and 2 or 0
-    for x = 0, W - 1 do
-      px[y * W + x + 1] = string.char(band)
-    end
-    px[y * W + ((y * 2) % W) + 1] = string.char(15)
-  end
-  local chars = table.concat(px):gsub("..", xlat2)
-  last_chunk = {}
-  send_frame(chars, true)
-end
 
 -- ─────────────────────────────────────────────────────────────────────────
 -- Handshake
@@ -343,12 +401,13 @@ end)
 local m = {}
 local sel = 1
 local items = {
-  { label = "control",   kind = "bool",  key = "control" },
-  { label = "mirror",    kind = "bool",  key = "mirror" },
-  { label = "fps",       kind = "int",   key = "fps", min = 1, max = 40 },
-  { label = "host",      kind = "text",  key = "host" },
-  { label = "re-ping",   kind = "action", fn = function() handshake() end },
-  { label = "test card", kind = "action", fn = function() send_test_card() end },
+  { label = "control", kind = "bool",  key = "control" },
+  { label = "mirror",  kind = "bool",  key = "mirror" },
+  { label = "fps",     kind = "int",   key = "fps", min = 1, max = 40 },
+  { label = "host",    kind = "text",  key = "host" },
+  { label = "test",    kind = "test" },
+  { label = "line y",  kind = "line" },
+  { label = "re-ping", kind = "action", fn = function() handshake() end },
 }
 
 m.key = function(n, z)
@@ -373,7 +432,15 @@ m.enc = function(n, d)
     sel = util.clamp(sel + d, 1, #items)
   elseif n == 3 then
     local it = items[sel]
-    if it.kind == "int" then
+    if it.kind == "test" then
+      test_mode = util.clamp(test_mode + d, 1, #TEST_MODES)
+      build_test_chars()
+      last_chunk = {}       -- the panel is showing something else entirely
+    elseif it.kind == "line" then
+      test_line = util.clamp(test_line + d, 0, H - 1)
+      build_test_chars()
+      last_chunk = {}
+    elseif it.kind == "int" then
       config[it.key] = util.clamp(config[it.key] + d, it.min, it.max)
       if it.key == "fps" then frame_period = 1 / math.max(1, config.fps) end
     elseif it.kind == "bool" then
@@ -396,10 +463,17 @@ m.redraw = function()
     screen.level(i == sel and 15 or 3)
     screen.move(0, y)
     screen.text(it.label)
-    if it.kind ~= "action" then
-      screen.move(127, y)
-      local v = config[it.key]
+    local v
+    if it.kind == "test" then
+      v = TEST_MODES[test_mode]
+    elseif it.kind == "line" then
+      v = (TEST_MODES[test_mode] == "line") and test_line or "-"
+    elseif it.kind ~= "action" then
+      v = config[it.key]
       if type(v) == "boolean" then v = v and "on" or "off" end
+    end
+    if v ~= nil then
+      screen.move(127, y)
       screen.text_right(tostring(v))
     end
   end
@@ -413,5 +487,12 @@ mod.menu.register(this_name, m)
 
 pf.config = config
 pf.handshake = handshake
-pf.send_test_card = send_test_card
+
+-- Exposed so the offline tests can drive the menu the way a hand would,
+-- rather than reaching into upvalues. See tools/test_mod.lua.
+pf.menu = m
+pf.items = items
+pf.select = function(i) sel = i end
+pf.test_mode_name = function() return TEST_MODES[test_mode] end
+
 return pf
