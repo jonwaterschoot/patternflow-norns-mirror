@@ -16,8 +16,16 @@
 // running this claims to be core, and somebody who did not flash it has no
 // way to find out what is actually on it — and the update banner would offer
 // them a core release to install on top.
+// Bump this whenever the wire protocol or a diagnostic changes, so
+// /api/status says which firmware is actually on the panel. The first hardware
+// session lost time to exactly that: the only way to tell that a panel was a
+// build behind was that a field it should have reported was missing.
+//
+//   v0.1.0  first build
+//   v0.2.0  pixel-pair payload, /pf/scr/end double buffering, Black blanking,
+//           screencast.rowdup in /api/status
 #define PF_VARIANT "norns"
-#define PF_VARIANT_VERSION "v0.1.0"
+#define PF_VARIANT_VERSION "v0.2.0"
 
 // ── Where the panel's own OSC goes ──────────────────────────────────────
 //

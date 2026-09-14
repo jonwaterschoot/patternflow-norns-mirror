@@ -465,6 +465,63 @@ A blank screen legitimately reports `rowdup: 63` — every row matches its
 neighbour because they are all black. The number only means something against
 a card that makes neighbours differ.
 
+### Read the brightness, not just the position
+
+The `line` card writes **level 15 to one row and level 0 to every other one**.
+There is no intermediate value anywhere in it.
+
+So if a second row lights up *dimmer* than the selected one, it is displaying a
+brightness that does not exist in the data. No amount of duplication, shifting
+or mis-chunking can invent it. That single observation settles the question
+before `rowdup` is even consulted: the extra row is **ghosting** — charge or
+drive bleeding between adjacent row scans — and it happens downstream of
+everything this project controls.
+
+Two rows at *equal* brightness would mean the opposite: identical data, which
+is ours and would show up as a non-zero `rowdup`.
+
+### If it is ghosting
+
+It is a panel and driver matter, and it tends to be unit-specific. It stays
+invisible under Patternflow's own patterns because those are smooth colour
+fields — neighbouring rows are nearly the same, so a faint copy of one in the
+other cannot be seen. A one-pixel white line on black is the worst case that
+exists, which is why mirroring a norns UI is what found it.
+
+The driver's control for this is **latch blanking** — how many clock cycles
+`OE` is blanked around the `LAT` signal. Patternflow sets it in
+`src/core_display.h`:
+
+```c
+mxconfig.latch_blanking = 2;     // library default; max is 4
+```
+
+Raising it to 3 or 4 is the standard remedy. It is a **core file**, so nothing
+in this project will change it for you and it is not an `#ifndef` you can
+override from the bundle. To try it, edit the vendored copy, rebuild, and put
+it back afterwards:
+
+```bash
+vi vendor/patternflow/firmware/patternflow/src/core_display.h   # set it to 4
+tools/build-firmware.sh
+# ... test, then:
+git -C vendor/patternflow checkout src/core_display.h
+```
+
+The submodule is dirty until you revert it — `git -C vendor/patternflow status`
+will say so. Note the library's own warning that values above 1 can cause
+artefacts on some panels, so look at a gradient afterwards as well as a line.
+
+If raising it helps, that is worth an issue upstream at
+[engmung/Patternflow](https://github.com/engmung/Patternflow) — a hardcoded 2
+that some panels need higher is a config question, and upstream is the right
+place for it rather than a fork here.
+
+Before touching firmware, the cheap hardware fixes are worth trying, because
+ghosting at specific row addresses is a signal-integrity symptom: a shorter or
+better-routed HUB75 ribbon, a ferrite on it, and grounding. `core_display.h`
+recommends the same order for a different artefact.
+
 ### What a dead pixel cannot do
 
 A physically dead LED is one pixel that never lights. It cannot make a row
@@ -472,6 +529,30 @@ appear twice: row addressing happens before any individual LED is driven, and
 a dead emitter has no way to reach back and change which row data is latched
 into. If a dead pixel were somehow involved you would see a *hole*, always in
 the same place, not a repeat. Rule it out and look at the row mapping.
+
+### Is the panel even running the firmware you think?
+
+`/api/status` reports `variantVersion`. If it is not what the bundle's
+`overrides.h` says, the panel is a build behind and you may be chasing
+something already fixed — `rowdup` missing from `screencast` entirely means
+exactly that.
+
+### `dropped` climbing
+
+`screencast.dropped` counts datagrams the panel refused. A mod and a firmware
+from different commits will drop **everything**, because the payload length no
+longer matches what the chunk header promises — so a large `dropped` that is no
+longer growing is just the history of the minutes before you updated both
+halves. To tell which:
+
+```bash
+curl -s http://patternflow.local/api/status | grep -o '"dropped":[0-9]*'
+sleep 30
+curl -s http://patternflow.local/api/status | grep -o '"dropped":[0-9]*'
+```
+
+Unchanged is fine and needs nothing. Still climbing means the two halves are
+out of step, or something else on the network is talking to port 9002.
 
 ## Troubleshooting
 
