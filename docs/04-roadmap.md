@@ -99,6 +99,15 @@ the interesting work is aesthetic rather than structural.
 
 ---
 
+## Open, parked
+
+- **One panel doubles a row pair** under the mirror — a display fault, not a
+  data one, with the obvious remedy already ruled out.
+  [06-row-ghosting.md](06-row-ghosting.md) has the evidence and the next steps.
+  Not blocking: everything else works on the same unit.
+
+---
+
 ## Explicitly not planned
 
 - **Pixels from the panel to norns.** Upstream removed `GET /api/frame` the day

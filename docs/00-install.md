@@ -486,41 +486,13 @@ It is a panel and driver matter, and it tends to be unit-specific. It stays
 invisible under Patternflow's own patterns because those are smooth colour
 fields — neighbouring rows are nearly the same, so a faint copy of one in the
 other cannot be seen. A one-pixel white line on black is the worst case that
-exists, which is why mirroring a norns UI is what found it.
+exists, which is why mirroring a norns UI is what found it. **The mirror is a
+much harsher test of a panel than the patterns it was built for.**
 
-The driver's control for this is **latch blanking** — how many clock cycles
-`OE` is blanked around the `LAT` signal. Patternflow sets it in
-`src/core_display.h`:
-
-```c
-mxconfig.latch_blanking = 2;     // library default; max is 4
-```
-
-Raising it to 3 or 4 is the standard remedy. It is a **core file**, so nothing
-in this project will change it for you and it is not an `#ifndef` you can
-override from the bundle. To try it, edit the vendored copy, rebuild, and put
-it back afterwards:
-
-```bash
-vi vendor/patternflow/firmware/patternflow/src/core_display.h   # set it to 4
-tools/build-firmware.sh
-# ... test, then:
-git -C vendor/patternflow checkout src/core_display.h
-```
-
-The submodule is dirty until you revert it — `git -C vendor/patternflow status`
-will say so. Note the library's own warning that values above 1 can cause
-artefacts on some panels, so look at a gradient afterwards as well as a line.
-
-If raising it helps, that is worth an issue upstream at
-[engmung/Patternflow](https://github.com/engmung/Patternflow) — a hardcoded 2
-that some panels need higher is a config question, and upstream is the right
-place for it rather than a fork here.
-
-Before touching firmware, the cheap hardware fixes are worth trying, because
-ghosting at specific row addresses is a signal-integrity symptom: a shorter or
-better-routed HUB75 ribbon, a ferrite on it, and grounding. `core_display.h`
-recommends the same order for a different artefact.
+One case has been investigated this far and is written up in
+[06-row-ghosting.md](06-row-ghosting.md) — including the obvious remedy (raising
+the driver's latch blanking) being **tried and found to make no difference**,
+which is worth knowing before spending an evening on it. Start there.
 
 ### What a dead pixel cannot do
 

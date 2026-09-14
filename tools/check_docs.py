@@ -11,11 +11,14 @@ caught.
 Anchor slugs follow GitHub's rule closely enough for our headings: lowercase,
 punctuation dropped, whitespace to hyphens.
 
-Only files git tracks are checked. Walking the tree instead meant deciding by
-hand what to skip, and the list was never finished — vendor/ was excluded but
+Files are found by asking git, not by walking the tree. Walking meant a
+hand-maintained skip list, and it was never finished — vendor/ was excluded but
 build/libdeps/ was not, so the day the build moved inside the repo this tool
-started reporting broken links in a vendored Bluetooth library. Asking git is
-the same question with a maintained answer.
+started reporting broken links in a vendored Bluetooth library.
+
+Tracked AND untracked-but-not-ignored, which matters: a brand-new page is
+untracked until it is staged, and checking only tracked files meant the one
+document most likely to have a bad link was the one document never checked.
 """
 import os
 import re
@@ -37,7 +40,7 @@ def main():
     os.chdir(ROOT)
     try:
         listing = subprocess.run(
-            ["git", "ls-files", "*.md"],
+            ["git", "ls-files", "--cached", "--others", "--exclude-standard", "*.md"],
             capture_output=True, text=True, check=True,
         ).stdout.split("\n")
     except (subprocess.CalledProcessError, FileNotFoundError):
