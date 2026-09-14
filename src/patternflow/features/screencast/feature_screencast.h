@@ -54,6 +54,14 @@ inline const uint8_t* composeFrame(const uint8_t* frame, int w, int h) {
   return PatternflowScreencast::compose(frame, w, h);
 }
 
+// Stand the running pattern down while the mirror is up: the pattern renders
+// a full frame every frame that composeFrame then discards. We ask; loading a
+// module is the sketch's job. Deliberately no claimsPattern — the mirror is a
+// view, not a mode, and a host asking for a pattern should still win.
+inline bool takePattern(int* idx) {
+  return PatternflowScreencast::consumePatternRequest(idx);
+}
+
 inline void appendStatus(String& json) { PatternflowScreencast::appendStatus(json); }
 
 inline bool isRuntimeEnabled() { return PatternflowScreencast::isRuntimeEnabled(); }
@@ -69,7 +77,7 @@ inline const PFFeature descriptor = {
     nullptr,       // fillInput
     nullptr,       // onUserInput
     nullptr,       // claimsPattern - the mirror is a view, never a mode
-    nullptr,       // takePattern
+    takePattern,
     nullptr,       // onSleep
     nullptr,       // requestSleep
     "SCR",         // shortName - the device NETWORK screen row

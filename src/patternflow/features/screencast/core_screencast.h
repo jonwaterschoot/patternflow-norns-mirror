@@ -25,6 +25,12 @@
 #include "../../src/core_mem.h"
 #include "../pf_feature.h"
 
+#if PF_SCREENCAST_ENABLED && PF_SCREENCAST_BLANK_PATTERN
+// For findPatternByName, so the mirror can stand the running pattern down.
+// show/, weather/ and mqtt/ reach it the same way.
+#include "../../pattern_registry.h"
+#endif
+
 #if PF_SCREENCAST_ENABLED
 
 #include <Preferences.h>
@@ -47,7 +53,17 @@ inline WiFiUDP udp;
 inline bool ready = false;
 inline bool runtimeEnabled = true;
 
-inline uint8_t* levels = nullptr;   // SRC_PX, one 0-15 grey per pixel
+// Double-buffered, and that is not an optimisation — it is what stops the
+// panel showing a frame band by band. Chunks land in `pending`; only
+// /pf/scr/end copies it to `levels`, which is the one compose() reads. The
+// first hardware test showed frames visibly filling top to bottom without it.
+//
+// A copy rather than a pointer swap: unchanged bands are never re-sent, so
+// `pending` has to keep carrying the last full picture. Swapping would leave
+// the back buffer holding the frame before last, and any band that had not
+// changed since would flick between the two. 8 KB per frame is nothing.
+inline uint8_t* levels = nullptr;   // SRC_PX, one 0-7 grey per pixel, on show
+inline uint8_t* pending = nullptr;  // SRC_PX, the frame being assembled
 inline uint8_t* scratch = nullptr;  // SRC_PX * 3, RGB888 handed to the core
 inline uint8_t* rx = nullptr;       // RX_CAP
 
@@ -56,10 +72,15 @@ inline uint32_t framesSeen = 0;
 inline uint32_t chunksSeen = 0;
 inline uint32_t dropped = 0;
 
+// Grey levels on the wire. norns has 16; two of them pack into one 7-bit
+// character only if each is 3 bits, so the mod sends 8 and this renders 8.
+// See the encoding note in the mod for why halving the payload mattered.
+constexpr int LEVELS = 8;
+
 // Tint. 0 = plain white (the honest monochrome mirror); turning right walks
 // the hue circle. Kept as clicks so the knob has a repeatable home position.
 inline int hueClicks = 0;
-inline uint8_t palette[16][3];
+inline uint8_t palette[LEVELS][3];
 inline bool paletteStale = true;
 
 // Frame facts, latched by the loop hook: composeFrame gets w/h but not
@@ -83,8 +104,8 @@ inline void buildPalette() {
                               (float)(PF_SCREENCAST_HUE_RANGE > 1 ? PF_SCREENCAST_HUE_RANGE - 1 : 1);
   const float s = white ? 0.0f : 1.0f;
 
-  for (int lvl = 0; lvl < 16; lvl++) {
-    const float v = (float)lvl / 15.0f;
+  for (int lvl = 0; lvl < LEVELS; lvl++) {
+    const float v = (float)lvl / (float)(LEVELS - 1);
     float r = v, g = v, b = v;
     if (s > 0.0f) {
       const float hh = h * 6.0f;
@@ -174,30 +195,51 @@ inline bool oscNumber(const uint8_t* buf, size_t len, size_t pos, char type, lon
   return false;
 }
 
-inline int hexVal(uint8_t c) {
-  if (c >= '0' && c <= '9') return c - '0';
-  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-  return -1;
+// The 64-character alphabet the mod packs pixel pairs into. Must match
+// ALPHABET in mod.lua exactly, character for character.
+inline const char* ALPHABET =
+    "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz+-";
+
+inline int8_t symVal[256];
+inline bool symReady = false;
+
+inline void buildSymbolTable() {
+  for (int i = 0; i < 256; i++) symVal[i] = -1;
+  for (int i = 0; i < 64; i++) symVal[(uint8_t)ALPHABET[i]] = (int8_t)i;
+  symReady = true;
 }
 
 // ── The wire ─────────────────────────────────────────────────────────────
 //
 //   /pf/scr       ,ffs   chunk, nchunks, payload
-//   /pf/scr/ping  (none)
+//   /pf/scr/end   (none)
 //
-// Every /pf/scr datagram is a complete statement about its own band of rows,
+// Each /pf/scr datagram is a complete statement about its own band of rows,
 // so there is no reassembly and no sequence number: a lost packet costs those
 // rows until they next change or the mod's periodic full refresh comes round.
 // Chunk c covers pixels [c*px, (c+1)*px) where px = SRC_PX / nchunks, which
-// for the mod's 8 chunks is 8 whole rows each.
+// for the mod's 4 chunks is 16 whole rows each.
+//
+// The payload is one character per PIXEL PAIR: (a * 8 + b) into ALPHABET,
+// where a and b are 3-bit greys. So a chunk carries px/2 characters.
+//
+// /pf/scr/end says the frame is complete — publish it — and doubles as the
+// liveness beacon, which is why the mod sends it four times a second even
+// when the screen has not changed.
+
+inline void publishFrame() {
+  if (!levels || !pending) return;
+  memcpy(levels, pending, SRC_PX);
+  framesSeen++;
+}
 
 inline bool handleDatagram(const uint8_t* buf, size_t len) {
   const char* addr;
   size_t pos;
   if (!oscString(buf, len, 0, &addr, &pos)) return false;
 
-  if (strcmp(addr, "/pf/scr/ping") == 0) {
+  if (strcmp(addr, "/pf/scr/end") == 0) {
+    publishFrame();
     lastPacketMs = millis();
     return true;
   }
@@ -216,24 +258,35 @@ inline bool handleDatagram(const uint8_t* buf, size_t len) {
   if (nchunks <= 0 || nchunks > 64) return false;
   if (SRC_PX % (size_t)nchunks) return false;
   const size_t px = SRC_PX / (size_t)nchunks;
+  if (px % 2) return false;  // pixels are packed in pairs
   if (chunk < 0 || (size_t)chunk >= (size_t)nchunks) return false;
 
   const char* payload;
   size_t after;
   if (!oscString(buf, len, pos, &payload, &after)) return false;
-  if (strlen(payload) != px) return false;
+  const size_t chars = px / 2;
+  if (strlen(payload) != chars) return false;
 
-  if (!levels) return false;
-  uint8_t* dst = levels + (size_t)chunk * px;
-  for (size_t i = 0; i < px; i++) {
-    const int v = hexVal((uint8_t)payload[i]);
-    if (v < 0) return false;  // malformed: leave the band as it was
-    dst[i] = (uint8_t)v;
+  if (!pending) return false;
+  if (!symReady) buildSymbolTable();
+
+  // Validate the whole payload before writing any of it. Bailing out mid-loop
+  // left half a band of decoded pixels behind and the other half stale, which
+  // is a worse outcome than dropping the packet — the band would sit torn
+  // until something changed it.
+  for (size_t i = 0; i < chars; i++) {
+    if (symVal[(uint8_t)payload[i]] < 0) return false;
+  }
+
+  uint8_t* dst = pending + (size_t)chunk * px;
+  for (size_t i = 0; i < chars; i++) {
+    const int v = symVal[(uint8_t)payload[i]];
+    dst[i * 2] = (uint8_t)(v / LEVELS);
+    dst[i * 2 + 1] = (uint8_t)(v % LEVELS);
   }
 
   lastPacketMs = millis();
   chunksSeen++;
-  if (chunk == 0) framesSeen++;
   return true;
 }
 
@@ -242,9 +295,10 @@ inline bool handleDatagram(const uint8_t* buf, size_t len) {
 inline void begin() {
   if (WiFi.status() != WL_CONNECTED) return;
   if (!levels) levels = (uint8_t*)PFMem::alloc(SRC_PX);
+  if (!pending) pending = (uint8_t*)PFMem::alloc(SRC_PX);
   if (!scratch) scratch = (uint8_t*)PFMem::alloc(SRC_PX * 3);
   if (!rx) rx = (uint8_t*)PFMem::alloc(RX_CAP);
-  if (!levels || !scratch || !rx) {
+  if (!levels || !pending || !scratch || !rx) {
     Serial.println("[SCR] out of memory; mirror disabled");
     return;
   }
@@ -276,9 +330,65 @@ inline bool active() {
          (millis() - lastPacketMs) < PF_SCREENCAST_TIMEOUT_MS;
 }
 
+// ── Standing the pattern down while the mirror is up ─────────────────────
+//
+// The pattern underneath keeps running while we mirror: its update() and
+// draw() cost a full frame's work every frame, and then composeFrame throws
+// the result away. Nobody sees it and it competes with the blit for the loop.
+//
+// So while the mirror is live we ask for the Black preset — a compiled-in
+// pattern whose draw() clears and presents — and ask for the previous one
+// back when the mirror stops. Requesting is all a feature may do: loading a
+// module is the sketch's job, which is what takePattern is for.
+//
+// This never *claims* the pattern. The mirror is a view, not a mode, and a
+// host that wants a different pattern while mirroring should still win.
+
+inline bool wantSwitch = false;
+inline int wantIdx = -1;
+inline int restoreIdx = -1;   // what was running before we blanked it
+inline bool blanked = false;
+inline int blackIdx = -2;     // -2 = not looked up yet, -1 = not present
+
+inline void updateBlanking(int currentIdx) {
+#if PF_SCREENCAST_BLANK_PATTERN
+  if (blackIdx == -2) blackIdx = findPatternByName("Black");
+  if (blackIdx < 0) return;   // this build carries no Black preset
+
+  const bool live = active() && !chromeUp;
+  if (live && !blanked) {
+    if (currentIdx == blackIdx) return;  // already there; nothing to restore
+    restoreIdx = currentIdx;
+    wantIdx = blackIdx;
+    wantSwitch = true;
+    blanked = true;
+  } else if (!live && blanked) {
+    blanked = false;
+    // Only put it back if nothing else moved the pattern meanwhile — if a
+    // host or a hand chose something while we were mirroring, that choice
+    // is newer than ours and outranks it.
+    if (restoreIdx >= 0 && currentIdx == blackIdx) {
+      wantIdx = restoreIdx;
+      wantSwitch = true;
+    }
+    restoreIdx = -1;
+  }
+#else
+  (void)currentIdx;
+#endif
+}
+
+inline bool consumePatternRequest(int* idx) {
+  if (!wantSwitch) return false;
+  wantSwitch = false;
+  *idx = wantIdx;
+  return true;
+}
+
 inline void noteFrame(const PFFeatureFrame& f) {
   chromeUp = f.chromeVisible;
   running = f.running;
+  updateBlanking(f.patternIndex);
 }
 
 // ── The hook ─────────────────────────────────────────────────────────────
@@ -293,7 +403,7 @@ inline const uint8_t* compose(const uint8_t* canvas, int w, int h) {
   const uint8_t* src = levels;
   uint8_t* dst = scratch;
   for (size_t i = 0; i < SRC_PX; i++, dst += 3) {
-    const uint8_t* c = palette[src[i] & 0x0F];
+    const uint8_t* c = palette[src[i] & (LEVELS - 1)];
     dst[0] = c[0];
     dst[1] = c[1];
     dst[2] = c[2];
@@ -356,6 +466,7 @@ inline void noteFrame(const PFFeatureFrame&) {}
 inline const uint8_t* compose(const uint8_t*, int, int) { return nullptr; }
 inline void loadSettings() {}
 inline void nudgeHue(int) {}
+inline bool consumePatternRequest(int*) { return false; }
 inline bool isRuntimeEnabled() { return false; }
 inline void setRuntimeEnabled(bool) {}
 inline void appendStatus(String&) {}

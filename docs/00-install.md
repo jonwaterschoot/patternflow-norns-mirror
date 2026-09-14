@@ -346,9 +346,10 @@ register — check `maiden`'s REPL output for a Lua error.
 |---|---|
 | `control` | panel encoders and buttons drive norns |
 | `mirror` | the norns screen is sent to the panel |
-| `fps` | mirror rate cap, 1–30. 20 is the default |
+| `fps` | mirror rate cap, 1–40. 20 is the default; lower it first if norns feels loaded |
 | `host` | the panel: `patternflow.local`, or its IP |
 | `re-ping` | send the handshake again now |
+| `test card` | send a one-pixel diagonal that crosses every row exactly once, with faint bars at the chunk boundaries. Any row that is duplicated, dropped or shifted shows as a step in an otherwise straight line |
 
 **E2** selects a row, **E3** changes it, **K3** toggles or fires an action,
 **K2** saves and exits.
@@ -440,8 +441,11 @@ always was: long-press K1.
 | Control works, mirror does not | the screencast half only | check `SCR` is ON (NETWORK screen, turn K3) and `mirror` is on in the mod menu |
 | Mirror works, control does not | `PF_OSC_REMOTE_PORT` is not 10111 | you set it in your secrets file and overrode ours, or you flashed a stock edition |
 | Mirror freezes, then the pattern returns | keepalives stopped arriving | norns busy, or Wi-Fi dropped. The panel is *supposed* to hand itself back |
+| The pattern keeps coming back whenever norns is idle | the heartbeat is not running | a mod older than the reserved-metro fix; or another mod took metro `metro_id` (35). Both halves must be updated together |
+| Frames visibly fill in top to bottom | mod and firmware are out of step | `/pf/scr/end` is what publishes a frame; a mod without it, or a firmware without it, tears. Re-copy the mod and reflash |
+| Rows look duplicated or shifted | worth isolating | run **test card** from the mod menu: it draws a one-pixel diagonal crossing every row exactly once, with faint bars at the chunk boundaries. A clean straight line means the mapping is right and what you saw was tearing |
 | Mirror vanishes while you use the panel's menus | working as intended | the mirror yields while the panel's own UI is up (`chromeVisible`) |
-| norns audio glitches while mirroring | the Lua mirror is costing too much | lower `fps`; see [the note on per-send cost](02-wire-protocol.md#one-cost-to-watch-during-bring-up) |
+| norns audio glitches while mirroring | the Lua mirror is costing too much | lower `fps`; see [the note on per-send cost](02-wire-protocol.md#the-cost-that-shapes-all-of-this) |
 | Panel switches patterns on its own | something is sending `/patternflow/pattern/index` | another OSC host on the network found it |
 
 ### Turning it off

@@ -80,8 +80,8 @@ Nothing in this project uses it, but it costs nothing and it is there.
 ## 3. The mirror — norns → panel, port 9002
 
 ```
-/pf/scr       ,ffs   chunk, nchunks, payload
-/pf/scr/ping  (no arguments)
+/pf/scr      ,ffs   chunk, nchunks, payload
+/pf/scr/end  (no arguments)
 ```
 
 `chunk` and `nchunks` are floats because **norns cannot send anything else**:
@@ -91,67 +91,106 @@ without a second code path.
 
 ### The payload
 
-One hex character per pixel — `'0'`–`'9'`, `'a'`–`'f'` — for the norns grey
-level 0–15, row-major from the top-left. With the mod's `nchunks = 8` each
-chunk carries 1024 pixels, which is exactly 8 rows, and the datagram lands
-around 1060 bytes: comfortably inside a 1500-byte MTU, no IP fragmentation.
+One character per **pixel pair**, packed as `a * 8 + b` into a 64-character
+alphabet, where `a` and `b` are 3-bit grey levels, row-major from the top-left:
 
-Three properties worth stating, because each one bought something:
+```
+0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz+-
+```
+
+With the mod's `nchunks = 4` each chunk carries 2048 pixels — exactly 16 rows —
+as 1024 characters, and the datagram lands around 1060 bytes: comfortably
+inside a 1500-byte MTU, no IP fragmentation.
+
+Three properties, each of which bought something:
 
 **Every datagram is complete and idempotent.** Chunk *c* covers pixels
 `[c·px, (c+1)·px)` and says everything about them. There is no reassembly
-buffer, no sequence number and no partial-frame state on the panel. A dropped
-packet costs those rows until they next change or until the mod's two-second
-full refresh comes round — it can never leave the panel showing half of one
-frame and half of another.
+buffer and no sequence number. A dropped packet costs those rows until they
+next change or until the mod's two-second full refresh comes round.
 
 **Only changed chunks are sent.** The mod keeps the last payload per chunk and
-compares. A static norns screen sends nothing at all; typing in the parameter
-menu sends one or two chunks. This is what makes one-character-per-pixel
-affordable.
+compares. A static norns screen sends no chunks at all; typing in the parameter
+menu sends one.
 
 **Encoding is a single pass in C.** `screen.peek` hands back 8192 bytes and the
-mod converts them with one `string.gsub(buf, ".", table)`. The per-pixel work
-never enters the Lua interpreter, which is the whole reason a pure-Lua mirror
-is viable at all.
+mod converts them with one `string.gsub(buf, "..", table)` against a 256-entry
+table keyed by the two-byte pair. The per-pixel work never enters the Lua
+interpreter, which is the whole reason a pure-Lua mirror is viable.
 
-### Why hex and not something denser
+### Why 8 grey levels and not 16
 
-Packing two pixels into one byte would halve the traffic, and it was
-considered. It needs at least 225 distinct byte values, which means the high
-half of the range — and OSC defines a string as *non-null ASCII*, 7-bit. Both
-ends here are ours, but the bytes travel through liblo, which is not. Given
-that the dirty-chunk check already removes most real traffic, spec-clean beat
-half-size. If the mirror ever needs the bandwidth, the honest fix is a
-different address with a binary payload rather than a string that lies about
-being ASCII.
+The first version sent one hex character per pixel and kept all 16 of norns's
+levels. On hardware, moving content lagged. The cost was not the bytes so much
+as the **datagram count**: matron builds a fresh `lo_address` for every
+`osc.send`, so each datagram is its own socket open, sendto and close. Eight
+per frame at 20 fps is 160 of those a second.
 
-### One cost to watch during bring-up
+Pairing pixels halves it to four. Keeping 16 levels in a pair would need 256
+symbols — the high half of the byte range, outside OSC's "non-null ASCII", sent
+through a liblo we do not control. 8 levels is the honest trade, and norns's UI
+is mostly full-on, full-off and a few dim greys.
+
+Three pixels in two characters would keep all 16 levels at the same size
+(16³ = 64² exactly), but 3 divides neither a 128-pixel row nor a 64-row screen,
+so no chunking lines up with it. That is the only reason it is not what this
+does.
+
+### `/pf/scr/end` — frame complete
+
+Sent after a frame's chunks, and four times a second by the mod's heartbeat
+when nothing has changed. It does two jobs.
+
+**It publishes the frame.** The panel decodes chunks into a back buffer and
+only copies it forward on this message. Without it the panel showed each band
+the instant it arrived, and a frame was visibly drawn top to bottom — which is
+exactly what the first hardware test looked like.
+
+The copy is a copy and not a pointer swap on purpose: unchanged bands are never
+re-sent, so the back buffer has to keep carrying the last complete picture.
+Swapping would leave it holding the frame before last, and any band that had
+not changed since would flick between the two.
+
+**It is the liveness beacon.** A static norns screen sends no chunks, so
+without a beat the panel would decide the mirror had gone away and hand itself
+back to the running pattern.
+
+The heartbeat that sends it has to come from one of norns's **reserved metros
+(31–35)**. `metro.init()` hands out 1–30, and `script.lua`'s cleanup calls
+`metro.free_all()`, which stops all of those — it is stopping the script's
+timers and cannot know one is ours. On the first hardware test the heartbeat
+was on a script metro, so loading any script silently killed it and the pattern
+came back a second later.
+
+### Liveness window
+
+The panel treats the mirror as live for `PF_SCREENCAST_TIMEOUT_MS` (1200 ms)
+after any packet — long enough to ride out a couple of lost beats.
+
+### While the mirror is up, the pattern stands down
+
+The running pattern would otherwise render a full frame every frame for
+`composeFrame` to discard — invisible work competing with the blit. So the
+feature asks for the `Black` preset when the mirror goes live and asks for the
+previous pattern back when it stops. It only ever *asks*: loading a module is
+the sketch's job, and if a host or a hand chooses a pattern while mirroring,
+that choice is newer and is left alone.
+
+### The cost that shapes all of this
 
 `matron`'s `osc_send` builds a fresh `lo_address` for every call and frees it
 after (`matron/src/osc.cc`). liblo creates the UDP socket lazily on first send
 against an address and closes it when the address is freed, so **each
-`osc.send` is likely to be its own socket open, sendto and close** rather than
-a write to a shared one. That is not verified against liblo's sources here — it
-is inferred from the matron side — so treat it as a suspect rather than a fact.
+`osc.send` is very likely its own socket open, sendto and close** rather than a
+write to a shared one. That was flagged as a suspect before the first hardware
+test; the test — where the fix that helped was halving the datagram count, not
+the byte count — is the evidence for it.
 
-It matters because a full-screen animation at 20 fps is 8 datagrams a frame,
-160 a second. The dirty-chunk check means real screens rarely reach that, but
-if the mirror turns out to cost more norns CPU than expected, this is the first
-place to look, and dropping `fps` in the mod menu is the first thing to try.
-The structural fix, if it ever comes to that, is the Path 2 capture in
-[05-prior-art.md](05-prior-art.md) — a native sender with one socket of its
-own — which does not change a byte of this protocol.
-
-### Liveness
-
-`/pf/scr/ping` goes out four times a second whenever the mirror is on, whether
-or not anything changed. Without it a static screen would look identical to a
-disconnected norns, and the feature would hand the panel back to the running
-pattern mid-session.
-
-The panel treats the mirror as live for `PF_SCREENCAST_TIMEOUT_MS` (1200 ms)
-after any packet — long enough to ride out a couple of lost keepalives.
+It is why the payload is packed in pairs, why the fps cap exists, and why the
+first thing to try if the mirror costs more norns CPU than expected is dropping
+`fps` in the mod menu. The structural fix, if it ever comes to that, is the
+Path 2 capture in [05-prior-art.md](05-prior-art.md) — a native sender with one
+socket of its own — which would not change a byte of this protocol.
 
 ### Geometry
 

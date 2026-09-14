@@ -49,3 +49,16 @@
 #ifndef PF_SCREENCAST_HUE_RANGE
 #define PF_SCREENCAST_HUE_RANGE 96
 #endif
+
+// Stand the running pattern down while the mirror is up, by asking for the
+// Black preset and asking for the previous pattern back afterwards.
+//
+// Without this the pattern underneath renders a full frame every frame that
+// nobody ever sees — composeFrame replaces it — and competes with the blit
+// for the loop. On by default, but it needs the composition to carry the
+// Black preset: see the two PF_FEATURE_PRESET* defines in the bundle's
+// overrides.h. With no Black in the build this quietly does nothing, so a
+// composition that forgets them still runs.
+#ifndef PF_SCREENCAST_BLANK_PATTERN
+#define PF_SCREENCAST_BLANK_PATTERN 1
+#endif

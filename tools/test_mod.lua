@@ -55,11 +55,32 @@ _norns = {
   get_time = function() return math.floor(clock_now), (clock_now % 1) * 1e6 end,
 }
 
-metro = {
+-- norns hands out metros 1..30 to scripts and reserves 31..35. metro.free_all()
+-- (which script.lua calls on every script change) frees only the first 30, so
+-- which range the mod takes is the whole difference between a heartbeat that
+-- survives loading a script and one that does not. The stub tracks both.
+metro_pool = {}
+metro_init_calls = 0
+for i = 1, 36 do
+  metro_pool[i] = {
+    id = i, time = 1, event = nil, is_running = false,
+    start = function(self, t) if t then self.time = t end self.is_running = true end,
+    stop = function(self) self.is_running = false end,
+  }
+end
+
+metro = setmetatable({
   init = function()
-    return { time = 1, event = nil, start = function() end, stop = function() end }
+    metro_init_calls = metro_init_calls + 1
+    return metro_pool[1]          -- a script-range metro: the wrong one
   end,
-}
+  free_all = function()
+    for i = 1, 30 do metro_pool[i]:stop(); metro_pool[i].event = nil end
+  end,
+}, { __index = function(_, k)
+  if type(k) == "number" then return metro_pool[k] end
+  return nil
+end })
 
 -- module stubs resolved through require
 local stub_util = {
@@ -96,35 +117,91 @@ T.ok(#sent > 0, "handshake ping sent on startup")
 T.eq(sent[1].path, "/patternflow/ping", "first message is the ping")
 T.eq(sent[1].port, 9001, "ping goes to the panel's OSC port")
 
+-- ── the heartbeat ───────────────────────────────────────────────────────
+--
+-- This is the regression guard for the first hardware bug: the heartbeat was
+-- on a metro.init() metro, script.lua's cleanup calls metro.free_all(), and
+-- so loading any script killed it, the mirror timed out and the panel fell
+-- back to its pattern.
+
+print("\nheartbeat")
+local beating = nil
+for i = 1, 36 do
+  if metro_pool[i].event and metro_pool[i].is_running then beating = i end
+end
+T.ok(beating ~= nil, "a metro is driving the heartbeat")
+T.ok(beating ~= nil and beating > 30,
+     "and it is a RESERVED one (31-35), not a script metro  [got " ..
+     tostring(beating) .. "]")
+T.eq(metro_init_calls, 0, "metro.init() is never used for it")
+
+sent = {}
+metro_pool[beating].event(1)
+local beats = 0
+for _, s in ipairs(sent) do if s.path == "/pf/scr/end" then beats = beats + 1 end end
+T.eq(beats, 1, "each beat sends a frame-complete, which is the keepalive")
+
+-- The bug, reproduced: a script change frees every script metro.
+metro.free_all()
+local still = metro_pool[beating].event ~= nil and metro_pool[beating].is_running
+T.ok(still, "the heartbeat survives metro.free_all() — the script-load bug")
+
+sent = {}
+metro_pool[beating].event(1)
+beats = 0
+for _, s in ipairs(sent) do if s.path == "/pf/scr/end" then beats = beats + 1 end end
+T.eq(beats, 1, "and still beats after a script has come and gone")
+
 -- ── frame encoding ──────────────────────────────────────────────────────
+
+-- Decode a payload the way the panel does, so the test asserts on pixels
+-- rather than on the alphabet.
+local ALPHABET =
+  "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz+-"
+local symval = {}
+for i = 1, #ALPHABET do symval[ALPHABET:sub(i, i)] = i - 1 end
+
+local function decode(payload)
+  local px = {}
+  for i = 1, #payload do
+    local v = symval[payload:sub(i, i)]
+    px[#px + 1] = math.floor(v / 8)
+    px[#px + 1] = v % 8
+  end
+  return px
+end
 
 print("\nframe encoding")
 sent = {}
 clock_now = 100
 screen.update_default()   -- the wrapper installed by the mod
 
-local frames = {}
+local frames, ends = {}, 0
 for _, s in ipairs(sent) do
-  if s.path == "/pf/scr" then table.insert(frames, s) end
+  if s.path == "/pf/scr" then table.insert(frames, s)
+  elseif s.path == "/pf/scr/end" then ends = ends + 1 end
 end
-T.eq(#frames, 8, "an all-black first frame sends all 8 chunks")
+T.eq(#frames, 4, "an all-black first frame sends all 4 chunks")
+T.eq(ends, 1, "and exactly one frame-complete marker, after them")
+T.eq(sent[#sent].path, "/pf/scr/end", "the marker is last, so the panel shows a whole frame")
 T.eq(frames[1].port, 9002, "frames go to the screencast port")
-T.eq(frames[1].args[2], 8, "nchunks is 8")
-T.eq(#frames[1].args[3], 1024, "each chunk carries 1024 pixels")
-T.eq(frames[1].args[3], string.rep("0", 1024), "level 0 encodes as '0'")
+T.eq(frames[1].args[2], 4, "nchunks is 4")
+T.eq(#frames[1].args[3], 1024, "each chunk is 1024 characters = 2048 pixels")
 T.eq(frames[1].args[1], 0, "chunk indices start at 0")
-T.eq(frames[8].args[1], 7, "last chunk index is 7")
+T.eq(frames[4].args[1], 3, "last chunk index is 3")
+T.eq(decode(frames[1].args[3])[1], 0, "black decodes to level 0")
 
--- an unchanged screen should send nothing until the full refresh falls due
+-- an unchanged screen should send no chunks until the full refresh falls due
 sent = {}
 clock_now = 100.2
 screen.update_default()
 local n = 0
 for _, s in ipairs(sent) do if s.path == "/pf/scr" then n = n + 1 end end
 T.eq(n, 0, "an unchanged screen sends no chunks")
+T.eq(sent[#sent].path, "/pf/scr/end", "but still marks the frame, so the mirror stays up")
 
--- change one pixel in the top-left: only chunk 0 should move
-screen_buf = string.char(15) .. string.rep(string.char(0), 128 * 64 - 1)
+-- 16 norns levels are quantised to 8 on the wire
+screen_buf = string.char(15) .. string.char(0) .. string.rep(string.char(0), 128 * 64 - 2)
 sent = {}
 clock_now = 100.4
 screen.update_default()
@@ -134,9 +211,11 @@ for _, s in ipairs(sent) do
 end
 T.eq(#changed, 1, "one changed pixel sends exactly one chunk")
 T.eq(changed[1].args[1], 0, "the chunk that moved is chunk 0")
-T.eq(changed[1].args[3]:sub(1, 1), "f", "level 15 encodes as 'f'")
+local px = decode(changed[1].args[3])
+T.eq(px[1], 7, "norns level 15 becomes wire level 7")
+T.eq(px[2], 0, "and its neighbour in the same character stays 0")
 
--- a pixel in the last row belongs to chunk 7
+-- a pixel in the last row belongs to the last chunk
 screen_buf = string.rep(string.char(0), 128 * 64 - 1) .. string.char(8)
 sent = {}
 clock_now = 100.6
@@ -146,8 +225,9 @@ for _, s in ipairs(sent) do
   if s.path == "/pf/scr" then table.insert(changed, s) end
 end
 T.eq(#changed, 2, "reverting one chunk and changing another sends two")
-T.eq(changed[#changed].args[1], 7, "the last pixel lands in chunk 7")
-T.eq(changed[#changed].args[3]:sub(1024, 1024), "8", "level 8 encodes as '8'")
+T.eq(changed[#changed].args[1], 3, "the last pixel lands in the last chunk")
+px = decode(changed[#changed].args[3])
+T.eq(px[#px], 4, "norns level 8 becomes wire level 4")
 
 -- full refresh heals a panel that missed packets
 sent = {}
@@ -155,7 +235,7 @@ clock_now = 103.0
 screen.update_default()
 n = 0
 for _, s in ipairs(sent) do if s.path == "/pf/scr" then n = n + 1 end end
-T.eq(n, 8, "the periodic full refresh re-sends every chunk")
+T.eq(n, 4, "the periodic full refresh re-sends every chunk")
 
 -- fps throttle
 sent = {}
@@ -165,6 +245,28 @@ screen.update_default()
 n = 0
 for _, s in ipairs(sent) do if s.path == "/pf/scr" then n = n + 1 end end
 T.eq(n, 0, "a frame arriving inside the fps period is dropped")
+
+-- the test card: a diagonal that crosses every row exactly once
+print("\ntest card")
+sent = {}
+pf.send_test_card()
+local card = {}
+for _, s in ipairs(sent) do
+  if s.path == "/pf/scr" then card[s.args[1]] = decode(s.args[3]) end
+end
+T.eq(#sent, 5, "the test card is 4 chunks and a frame-complete")
+local diag_ok, band_ok = true, true
+for y = 0, 63 do
+  local c = math.floor(y / 16)
+  local within = (y % 16) * 128
+  local row = card[c]
+  if not row then diag_ok = false break end
+  if row[within + ((y * 2) % 128) + 1] ~= 7 then diag_ok = false end
+  -- x=1, not x=0: at y=0 the diagonal sits on x=0 and would mask the band.
+  if y % 16 == 0 and row[within + 2] ~= 1 then band_ok = false end
+end
+T.ok(diag_ok, "every row of the test card carries its diagonal pixel")
+T.ok(band_ok, "and each chunk boundary is marked")
 
 -- ── OSC routing ─────────────────────────────────────────────────────────
 

@@ -39,6 +39,25 @@
 // to learn from. That keeps this firmware portable between norns units.
 #define PF_OSC_REMOTE_PORT 10111
 
+// ── A blank pattern for the mirror to stand behind ──────────────────────
+//
+// While the mirror is up, the running pattern still renders a full frame
+// every frame and composeFrame then throws it away — invisible work that
+// competes with the blit. The screencast feature asks for this preset when
+// the mirror goes live and asks for the previous pattern back afterwards.
+//
+// Black is a core preset (features/show/preset_black.h) but nothing includes
+// it unless a composition says so, twice: the include is taken inside
+// feature_presets.h, and the entry expands inside the registry's preset
+// table. PATTERN_ENTRY_HIDDEN keeps it out of the K4 browser — it is
+// plumbing, not something to scroll past.
+//
+// The file depends only on core_canvas.h and core_encoders.h, so carrying it
+// does not drag the show player in. Set PF_SCREENCAST_BLANK_PATTERN to 0 to
+// leave the running pattern alone instead.
+#define PF_FEATURE_PRESET_INCLUDE "show/preset_black.h"
+#define PF_FEATURE_PRESETS PATTERN_ENTRY_HIDDEN(Black),
+
 // ── The microphone stays off by default here ────────────────────────────
 //
 // The Audio edition turns this on because it is the edition built for a panel

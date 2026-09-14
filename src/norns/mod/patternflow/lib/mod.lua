@@ -46,6 +46,12 @@ local config = {
 
   enc_map = { 1, 2, 3, 0 },  -- panel knob N -> norns encoder (0 = leave to the panel)
   key_map = { 1, 2, 3, 0 },  -- panel button N -> norns key
+
+  -- Which of norns's reserved metros (31-35) drives the heartbeat. Reserved
+  -- ones are never handed out by metro.init() and never stopped by
+  -- metro.free_all(), which is why the heartbeat has to use one — see
+  -- ensure_metro(). Change it only if another mod has claimed the same id.
+  metro_id = 35,
 }
 
 local function load_config()
@@ -68,37 +74,76 @@ end
 -- screen.peek(0,0,128,64) hands back 8192 bytes, one per pixel, valued 0-15.
 -- Touching those bytes one at a time from Lua, every frame, is the one thing
 -- that could make this mod expensive — so we never do. A single gsub with a
--- 256-entry translation table turns the whole buffer into hex in one pass
--- inside C, and the per-pixel work never enters the interpreter.
+-- translation table converts the whole buffer in one pass inside C, and the
+-- per-pixel work never enters the interpreter.
 --
--- One hex character per pixel keeps all 16 grey levels (which is what the
--- hue control needs to shade against) and stays inside 7-bit ASCII, which is
--- what OSC says a string is. Packing two pixels into one byte would halve the
--- traffic but needs 225+ distinct byte values, i.e. the high half of the
--- range — outside the spec, through a liblo we don't control. Not worth it:
--- the dirty-chunk check below already removes most of the traffic.
+-- TWO pixels per character, at 8 grey levels. The first hardware test showed
+-- moving content tearing and lagging, and the cost was dominated by the
+-- number of datagrams: matron builds a fresh lo_address per osc.send, so
+-- every datagram is its own socket open/sendto/close. Halving the payload
+-- halves the datagrams — 4 per frame instead of 8 — and that is the lever
+-- that mattered, more than the bytes themselves.
+--
+-- The pair is packed as (a>>1)*8 + (b>>1) into a 64-character alphabet, so
+-- everything stays 7-bit ASCII, which is what OSC says a string is. Keeping
+-- all 16 levels would need 256 symbols for a pair — the high half of the byte
+-- range, outside the spec, through a liblo we do not control. 8 levels is the
+-- honest trade and norns's UI is mostly full-on, full-off and a few dim greys.
+--
+-- (Three pixels in two characters would keep 16 levels at the same size —
+-- 16^3 == 64^2 exactly — but 3 does not divide a 128-pixel row or a 64-row
+-- screen, so no chunking lines up with it. That is the only reason it is not
+-- what this does.)
 -- ─────────────────────────────────────────────────────────────────────────
 
 local W, H = 128, 64
-local CHUNKS = 8                      -- 8 datagrams of 1024 px = 8 rows each
-local CHUNK_PX = (W * H) / CHUNKS     -- 1024
-local FULL_REFRESH_S = 2.0            -- re-send everything this often, so a
-                                      -- panel that joined late or dropped a
-                                      -- packet always heals
+local CHUNKS = 4                          -- 4 datagrams per frame
+local CHUNK_PX = (W * H) / CHUNKS         -- 2048 px = 16 rows
+local CHUNK_CHARS = CHUNK_PX / 2          -- 1024 chars, ~1060 bytes on the wire
+local FULL_REFRESH_S = 2.0                -- re-send everything this often, so a
+                                          -- panel that joined late or dropped a
+                                          -- packet always heals
 
-local HEX = "0123456789abcdef"
-local xlat = {}
-for v = 0, 255 do
-  -- peek should only ever give 0-15; the mask keeps a surprise from
-  -- indexing off the end of the alphabet.
-  local lvl = v % 16
-  xlat[string.char(v)] = HEX:sub(lvl + 1, lvl + 1)
+local ALPHABET =
+  "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz+-"
+
+-- Keyed by the two-byte string, so gsub("..", xlat2) does the lookup in C.
+local xlat2 = {}
+for a = 0, 15 do
+  for b = 0, 15 do
+    local idx = math.floor(a / 2) * 8 + math.floor(b / 2)
+    xlat2[string.char(a) .. string.char(b)] = ALPHABET:sub(idx + 1, idx + 1)
+  end
 end
 
 local last_chunk = {}   -- what the panel is believed to be showing
 local last_full = 0
 local frame_period = 1 / config.fps
 local last_send = 0
+
+-- Sent after a frame's chunks, and by the keepalive timer when nothing
+-- changed. Two jobs: tell the panel the frame is complete so it can show it
+-- in one go rather than band by band (this is what fixes the tearing), and
+-- refresh liveness so the panel does not hand itself back to its pattern.
+local function frame_end()
+  osc.send({ config.host, config.scr_port }, "/pf/scr/end")
+end
+
+local function send_frame(chars, force)
+  local dest = { config.host, config.scr_port }
+  for c = 0, CHUNKS - 1 do
+    local a = c * CHUNK_CHARS + 1
+    local payload = chars:sub(a, a + CHUNK_CHARS - 1)
+    if force or last_chunk[c] ~= payload then
+      last_chunk[c] = payload
+      -- Each datagram is a complete statement about its own band of rows, so
+      -- the panel needs no reassembly and a lost packet costs those rows
+      -- until they next change (or the next full refresh).
+      osc.send(dest, "/pf/scr", { c, CHUNKS, payload })
+    end
+  end
+  frame_end()
+end
 
 local function mirror_frame()
   local now = util.time()
@@ -108,30 +153,31 @@ local function mirror_frame()
   local ok, buf = pcall(screen.peek, 0, 0, W, H)
   if not ok or type(buf) ~= "string" or #buf < W * H then return end
 
-  local hex = buf:gsub(".", xlat)
+  local chars = buf:gsub("..", xlat2)
 
   local force = (now - last_full) >= FULL_REFRESH_S
   if force then last_full = now end
 
-  local dest = { config.host, config.scr_port }
-  for c = 0, CHUNKS - 1 do
-    local a = c * CHUNK_PX + 1
-    local payload = hex:sub(a, a + CHUNK_PX - 1)
-    if force or last_chunk[c] ~= payload then
-      last_chunk[c] = payload
-      -- Every datagram is a complete, idempotent statement about its own
-      -- rows, so the panel needs no reassembly and a lost packet costs
-      -- those rows until they next change (or the next full refresh).
-      osc.send(dest, "/pf/scr", { c, CHUNKS, payload })
-    end
-  end
+  send_frame(chars, force)
 end
 
--- Tells the feature we're still here when the screen is static and the loop
--- above is sending nothing at all. Without it the panel would decide the
--- mirror had gone away and hand the panel back to the running pattern.
-local function mirror_ping()
-  osc.send({ config.host, config.scr_port }, "/pf/scr/ping")
+-- A test card, for when the mirror is up but something about it looks wrong.
+-- A one-pixel diagonal is the point: it crosses every row exactly once, so a
+-- row that is duplicated, dropped or shifted shows up as a visible step in an
+-- otherwise straight line. The faint bars every 16 rows mark the chunk
+-- boundaries, which is where a chunking bug would land.
+local function send_test_card()
+  local px = {}
+  for y = 0, H - 1 do
+    local band = (y % 16 == 0) and 2 or 0
+    for x = 0, W - 1 do
+      px[y * W + x + 1] = string.char(band)
+    end
+    px[y * W + ((y * 2) % W) + 1] = string.char(15)
+  end
+  local chars = table.concat(px):gsub("..", xlat2)
+  last_chunk = {}
+  send_frame(chars, true)
 end
 
 -- ─────────────────────────────────────────────────────────────────────────
@@ -235,25 +281,55 @@ local function wrap_osc()
   end
 end
 
+-- The heartbeat. Two jobs: keep the mirror alive on the panel while the norns
+-- screen sits still (nothing is redrawn, so nothing else would send anything),
+-- and re-ping until the panel has answered, in case it booted after we did.
+--
+-- It must NOT come from metro.init(). That hands out ids 1..30, and
+-- script.lua's cleanup calls metro.free_all(), which stops every one of them —
+-- it is stopping the *script's* timers and has no way to know one is ours. So
+-- loading any script silently killed the heartbeat, the mirror timed out 1.2 s
+-- later, and the panel fell back to its pattern. That was the "pattern keeps
+-- popping back up when nothing happens on norns" from the first hardware test.
+--
+-- metro.lua allocates 36 metros, hands out only the first 30, and frees only
+-- the first 30. Ids 31-35 are marked reserved and belong to nobody: exactly
+-- this case. `metro[id]` reaches one directly (Metro.__index returns
+-- Metro.metros[idx] for a numeric key) and free_all never touches it.
+local function ensure_metro()
+  ping_metro = metro[config.metro_id]
+  if not ping_metro then
+    print("patternflow: metro " .. tostring(config.metro_id) ..
+          " does not exist; the mirror will time out when idle")
+    return
+  end
+  ping_metro.event = function(stage)
+    if config.mirror then
+      local ok, err = pcall(frame_end)
+      if not ok then print("patternflow: keepalive error: " .. tostring(err)) end
+    end
+    if stage % 20 == 0 and util.time() - heard_from_panel > 10 then
+      handshake()
+    end
+  end
+  ping_metro:start(0.25)
+end
+
 mod.hook.register("system_post_startup", this_name .. "-startup", function()
   load_config()
   frame_period = 1 / math.max(1, config.fps)
   wrap_osc()
   wrap_screen()
-
   handshake()
-  -- One timer covers both keepalives: re-ping until the panel has spoken to
-  -- us (it may have booted after we did), and tell the screencast feature
-  -- we're alive while the screen sits still.
-  ping_metro = metro.init()
-  ping_metro.time = 0.25
-  ping_metro.event = function(stage)
-    if config.mirror then mirror_ping() end
-    if stage % 20 == 0 then
-      if util.time() - heard_from_panel > 10 then handshake() end
-    end
-  end
-  ping_metro:start()
+  ensure_metro()
+end)
+
+-- Insurance, not the mechanism. A reserved metro should survive a script
+-- change untouched; this only costs a comparison and means that if some other
+-- mod ever does reach into the reserved range, the mirror recovers at the next
+-- script change instead of staying dead until a reboot.
+mod.hook.register("script_post_cleanup", this_name .. "-cleanup", function()
+  if ping_metro and ping_metro.is_running == false then ensure_metro() end
 end)
 
 mod.hook.register("system_pre_shutdown", this_name .. "-shutdown", function()
@@ -267,11 +343,12 @@ end)
 local m = {}
 local sel = 1
 local items = {
-  { label = "control",  kind = "bool",  key = "control" },
-  { label = "mirror",   kind = "bool",  key = "mirror" },
-  { label = "fps",      kind = "int",   key = "fps", min = 1, max = 30 },
-  { label = "host",     kind = "text",  key = "host" },
-  { label = "re-ping",  kind = "action" },
+  { label = "control",   kind = "bool",  key = "control" },
+  { label = "mirror",    kind = "bool",  key = "mirror" },
+  { label = "fps",       kind = "int",   key = "fps", min = 1, max = 40 },
+  { label = "host",      kind = "text",  key = "host" },
+  { label = "re-ping",   kind = "action", fn = function() handshake() end },
+  { label = "test card", kind = "action", fn = function() send_test_card() end },
 }
 
 m.key = function(n, z)
@@ -283,8 +360,9 @@ m.key = function(n, z)
     local it = items[sel]
     if it.kind == "bool" then
       config[it.key] = not config[it.key]
-    elseif it.kind == "action" then
-      handshake()
+    elseif it.kind == "action" and it.fn then
+      local ok, err = pcall(it.fn)
+      if not ok then print("patternflow: " .. it.label .. ": " .. tostring(err)) end
     end
     mod.menu.redraw()
   end
@@ -311,8 +389,10 @@ m.redraw = function()
   screen.move(0, 8)
   local age = util.time() - heard_from_panel
   screen.text("patternflow  " .. (age < 10 and "linked" or "no panel"))
+  -- 8px pitch from y=17: six rows land at 17..57 and clear the 64px screen.
+  -- At the 10px pitch this used the sixth row was drawn off the bottom.
   for i, it in ipairs(items) do
-    local y = 8 + i * 10
+    local y = 9 + i * 8
     screen.level(i == sel and 15 or 3)
     screen.move(0, y)
     screen.text(it.label)
@@ -333,4 +413,5 @@ mod.menu.register(this_name, m)
 
 pf.config = config
 pf.handshake = handshake
+pf.send_test_card = send_test_card
 return pf
