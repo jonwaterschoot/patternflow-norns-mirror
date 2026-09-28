@@ -24,8 +24,10 @@
 //   v0.1.0  first build
 //   v0.2.0  pixel-pair payload, /pf/scr/end double buffering, Black blanking,
 //           screencast.rowdup in /api/status
+//   v0.2.1  core v3.10.4: exact 300 Hz refresh, binary bit-plane chain,
+//           white balance back to identity — the mirror looks different
 #define PF_VARIANT "norns"
-#define PF_VARIANT_VERSION "v0.2.0"
+#define PF_VARIANT_VERSION "v0.2.1"
 
 // ── Where the panel's own OSC goes ──────────────────────────────────────
 //

@@ -107,8 +107,12 @@ this case was closed. Otherwise, roughly in order of effort:
 3. **Lower the panel clock.** `src/core_display.h` sets
    `mxconfig.i2sspeed = HZ_15M` with `min_refresh_rate = 240`, and its own
    comment discusses dropping to 8 MHz for artefacts — **lower
-   `min_refresh_rate` with it**, as that comment says, or the library sheds
-   bit-planes and gradients band. Same edit-and-revert loop as latch blanking.
+   `min_refresh_rate` with it**, as that comment says. Since v3.10.4 the
+   vendored driver meets the refresh floor by switching to a dimmer timing
+   pattern, not by dropping colour depth (`src/hub75/VENDORED.md`). A lower
+   clock with the floor left at 240 makes the panel dimmer rather than
+   banded. Before v3.10.4 it dropped colour depth instead, and gradients
+   banded. Same edit-and-revert loop as latch blanking.
 4. **Confirm it is independent of this project.** Anything that puts a single
    lit row on the panel without the mirror does it — a one-off pattern module,
    or the Live Editor. If a hand-written pattern drawing `drawFastHLine(0, 4,

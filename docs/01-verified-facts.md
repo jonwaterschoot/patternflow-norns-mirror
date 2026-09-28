@@ -56,8 +56,11 @@ files: `features_local.h` (includes + `PF_FEATURE_LIST` in dispatch order) and
 `overrides.h` (`#ifndef`-guarded settings, including `PF_VARIANT` and
 `PF_VARIANT_VERSION`).
 
-Stock editions: **audio** (`osc`, `audio`, `audio_in`, `midi`), **performance**
-(show, MQTT, weather), **clock**. The default build carries *no* features.
+Stock editions (`firmware/bundles/`, as of v3.10.4): **audio** (`osc`, `audio`,
+`audio_in`, `midi`) and **performance** (show, MQTT, weather) are the two
+upstream ships. **clock** and **midi** (USB-MIDI, built in its own PlatformIO
+env) stay in the tree only so CI keeps compiling them. The default build
+carries *no* features.
 
 ### The `PFFeature` hook table
 
