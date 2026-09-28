@@ -67,7 +67,7 @@ docs/
   03-architecture.md     mirror vs co-render; where the animation should live
   04-roadmap.md          milestones M0-M6 and what is explicitly not planned
   05-prior-art.md        ndi-mod, norns.online, and the capture fallback
-  06-row-ghosting.md     open: one panel doubles a row pair. Parked, cause narrowed
+  06-row-ghosting.md     closed: one panel doubled a row pair; a faulty panel
   archive/               the original session notes, superseded (see its README)
 src/
   norns/mod/patternflow/ the norns system mod: control in, mirror out, handshake

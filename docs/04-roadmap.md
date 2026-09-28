@@ -101,10 +101,11 @@ the interesting work is aesthetic rather than structural.
 
 ## Open, parked
 
-- **One panel doubles a row pair** under the mirror — a display fault, not a
-  data one, with the obvious remedy already ruled out.
-  [06-row-ghosting.md](06-row-ghosting.md) has the evidence and the next steps.
-  Not blocking: everything else works on the same unit.
+Nothing at present.
+
+**Closed 2026-09-28:** one panel doubled a row pair under the mirror. It was
+the panel; a replacement does not do it.
+[06-row-ghosting.md](06-row-ghosting.md) keeps the diagnosis.
 
 ---
 

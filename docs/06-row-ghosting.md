@@ -1,8 +1,12 @@
-# 06 — Open: row ghosting on one panel
+# 06 — Closed: row ghosting on one panel
 
-**Status: open, not blocking, cause narrowed to the panel or its driver.**
-Parked deliberately. This page exists so it can be picked up later without
-re-deriving anything.
+**Status: resolved 2026-09-28 — a faulty panel.** The panel was replaced, and
+the new one does not show the fault under the same `line` card, firmware and
+mod. Nothing in this project was changed to fix it, and nothing needed to be.
+The diagnosis below was reached before the swap and is kept because it was
+right, and because it is the route the next person with a doubled row should
+take. See [the resolution](#resolution) for what the swap does and does not
+tell us.
 
 ## The symptom
 
@@ -75,9 +79,23 @@ channel rather than a shared signal.
 Unit-specific, and the unit already has one dead LED, so a slightly
 out-of-spec panel is a coherent story.
 
-## If you come back to this
+## Resolution
 
-Roughly in order of effort:
+Swapping the panel made the fault disappear, and that confirms the conclusion
+above: the fault was in that unit, not in the mirror, the mod, the firmware or
+the driver settings. The swap kept everything else the same, so it is the one
+test that separates the panel from everything upstream of it.
+
+It does not say *which* part of the old panel was at fault. The row-select
+explanation is still the most likely one, but the old panel is the only way to
+check it. The brightness and ribbon tests below were never run on it. Nothing
+was reported upstream, because nothing upstream was at fault.
+
+## If you see this on another panel
+
+The steps below were the plan before the swap. **If a spare panel is
+available, try it first.** It settles the question in one step, which is how
+this case was closed. Otherwise, roughly in order of effort:
 
 1. **Does it depend on brightness?** `curl "http://patternflow.local/api/display?brightness=30"`
    and again at 200, with the `line` card up. A ghost that scales with drive is

@@ -489,10 +489,10 @@ other cannot be seen. A one-pixel white line on black is the worst case that
 exists, which is why mirroring a norns UI is what found it. **The mirror is a
 much harsher test of a panel than the patterns it was built for.**
 
-One case has been investigated this far and is written up in
-[06-row-ghosting.md](06-row-ghosting.md) — including the obvious remedy (raising
-the driver's latch blanking) being **tried and found to make no difference**,
-which is worth knowing before spending an evening on it. Start there.
+One case is written up in [06-row-ghosting.md](06-row-ghosting.md). The
+obvious remedy, raising the driver's latch blanking, was **tried and made no
+difference**. Replacing the panel fixed it. If you have a spare panel, swap it
+in before spending an evening on driver settings.
 
 ### What a dead pixel cannot do
 
