@@ -6,7 +6,8 @@ Both trees are vendored under `vendor/` as submodules — the paths below are
 relative to those.
 
 Verified **2026-09-14** against `engmung/Patternflow@main` (pushed 2026-09-13)
-and `monome/norns@main`.
+and `monome/norns@main`; Patternflow facts re-checked against **v3.11.0** on
+2026-10-04, and the norns OSC and `screen.peek` notes added 2026-10-05.
 
 > If you change one of these facts, change it here first. The rest of the docs
 > and all the code are written against this page.
@@ -56,8 +57,8 @@ files: `features_local.h` (includes + `PF_FEATURE_LIST` in dispatch order) and
 `overrides.h` (`#ifndef`-guarded settings, including `PF_VARIANT` and
 `PF_VARIANT_VERSION`).
 
-Stock editions (`firmware/bundles/`, as of v3.10.4): **audio** (`osc`, `audio`,
-`audio_in`, `midi`) and **performance** (show, MQTT, weather) are the two
+Stock editions (`firmware/bundles/`, as of v3.11.0): **audio** (`osc`, `audio`,
+`audio_in`, `midi`) and **performance** (clock, weather, MQTT, show) are the two
 upstream ships. **clock** and **midi** (USB-MIDI, built in its own PlatformIO
 env) stay in the tree only so CI keeps compiling them. The default build
 carries *no* features.
@@ -224,6 +225,44 @@ then 128×64 **RGB565** (16,392 bytes) — the panel's own last-drawn frame for 
 pattern. It is a poll, it 404s until the pattern has run, and a poll interval
 under a second is documented as "a bug rather than a feature".
 
+### Where a pattern module lives — and why its size stopped mattering
+
+From `firmware/patternflow/src/core_module_memory.h` and
+`src/core_module_loader.h`, as of **v3.11.0** (the code move landed in 3.10.5,
+the data move in 3.11.0).
+
+Before 3.10.5 a module's executable sections could only live in internal RAM —
+the same heap lwIP, the console and every feature run on — and the loader
+refused any module whose `codeBytes + PF_MODULE_INTERNAL_RESERVE` (24576) did
+not fit in what was free. That is the `code N B needs M free, have K` error,
+and the Audio edition's features left too little for patterns of ~8 KB of code
+and up ([06-hardware-findings.md](06-hardware-findings.md#some-patterns-would-not-load--fixed-upstream)).
+
+From 3.10.5, on the S3, `PF_MODULE_CODE_POLICY` defaults to
+`PF_MODULE_CODE_PSRAM_FIRST`: the code is placed in PSRAM and fetched through
+the instruction-bus alias of the same page. `admitCode()` then admits a module
+whenever PSRAM can take its code, and the internal-RAM comparison only decides
+the outcome if this unit has been **demoted** — a PSRAM placement that failed
+to read back, after which it keeps code internal until reboot. From 3.11.0 the
+data sections go to PSRAM first as well (`PF_MODULE_DATA_PSRAM_FIRST`).
+
+Upstream's measurement: on the Audio edition, internal heap with a module
+resident is ~27.8 KB whatever the size of its code, and a 32 KB-code module
+that was refused before now loads. The cost is 0–5% frame time on code-heavy
+modules (instruction-cache misses).
+
+`/api/status` → `moduleMemory`:
+
+| field | |
+|---|---|
+| `codePolicy` | `2` as built; `0` means this unit has been demoted since boot, and the old refusal is back |
+| `serviceFree`, `budget` | internal free, and free − reserve. Still published; no longer the admission test under policy 2 |
+| `resident` | `count`, `bytes`, `resumes`, `evictions` — modules kept loaded in PSRAM after another pattern took over (3.11.0, `core_module_resident.h`) |
+
+Residency matters to the mirror: the screencast swaps in the hidden `Black`
+preset while live and asks for the previous pattern back afterwards. That
+return is now a resume (~0.2 ms), not a reload with `setup()` run again.
+
 ---
 
 ## norns
@@ -289,6 +328,27 @@ void osc_send(const char *host, const char *port, const char *path, lo_message m
 A fresh `lo_address` per send, so the datagram leaves from an **ephemeral source
 port** — not 10111. This is exactly why the panel's auto-learn can give us the
 right IP and the wrong port, and why `PF_OSC_REMOTE_PORT` must be pinned.
+
+The same three lines have a second consequence, found on hardware
+(2026-10-05): **a host name is resolved again on every send**, inside
+`lo_send_message`, on matron's Lua thread, blocking. Nothing caches it,
+because the address is freed straight after. While `patternflow.local`
+resolves that costs little; when it stops resolving (the panel rebooting into
+new firmware, off the network, up as its own hotspot) every lookup takes
+seconds to fail, measured at 6.7 s from a desktop on the same network. A
+mirror sending several messages a second then freezes norns outright —
+screen, encoders, menus — until the mod is removed. So **never pass a name to
+`osc.send` on a hot path.** The mod resolves once, with `getent` through
+`norns.system_cmd` (`lua/core/norns.lua`: runs in a child process, answers by
+callback — `_system_cmd` in `weaver.cc` only queues it), and sends to the IP.
+
+`screen.peek` is blocking too, in a different way: `_screen_peek` posts a
+request to the screen thread and `sem_wait`s for the answer
+(`weaver.cc`, `screen_results.cc`). `screen_peek` in `hardware/screen.cc`
+returns *without* posting on two error paths (`malloc` failing, and
+`cairo_image_surface_get_data` returning NULL, logged as
+`ERROR: screen_peek: no data`), and the waiting Lua thread would then never
+wake. Not seen to happen; written down because it would look the same.
 
 ### norns answers `/remote/enc` and `/remote/key` out of the box
 

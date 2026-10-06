@@ -18,7 +18,7 @@ the norns OLED, because it is a photocopy of it.
   already owns global brightness (K1 long-press), so the mirror does not
   rebuild it.
 
-Built in [`src/norns/mod/patternflow/`](../src/norns/mod/patternflow/) and
+Built in [`src/norns/mod/pf-mirror/`](../src/norns/mod/pf-mirror/) and
 [`src/patternflow/features/screencast/`](../src/patternflow/features/screencast/).
 
 ## Feature B — co-rendering

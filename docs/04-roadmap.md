@@ -1,52 +1,46 @@
 # 04 — Roadmap
 
-Reordered after the source review in [01-verified-facts.md](01-verified-facts.md).
-The big change: **the panel controlling norns turns out to be the cheapest
-thing here, not the dearest.** norns already answers `/remote/enc` and
-`/remote/key`, and the panel already sends knob and button events, so that
-milestone is a translation table and no firmware work at all. It now comes
-first, because it is a working instrument on its own and it proves the link
-before any of the harder parts.
-
-Each milestone is independently useful and independently shippable.
+Each milestone is independently useful and independently shippable. M0, M2
+and M3 run on hardware today — firmware v0.4.0 on Patternflow core 3.11.0, and
+the mod — and are stable. M1 is built but switched off. What hardware taught us
+along the way is in [06-hardware-findings.md](06-hardware-findings.md).
 
 ---
 
-## M0 — Link up ✅ *code written, not yet run on hardware*
+## M0 — Link up ✅ *on hardware*
 
 Both devices on one Wi-Fi; the mod installed; the firmware flashed.
 
 **Exit:** the mod menu shows `linked`, and `curl http://patternflow.local/api/status`
 lists `screencast` in caps.
 
-## M1 — The panel as a norns controller ✅ *code written, not yet run on hardware*
+## M1 — The panel as a norns controller ⏸ *switched off*
 
 Panel encoders 1–3 and buttons 1–3 drive norns encoders and keys, system-wide,
 under any script, with no script changes. Nothing but the mod is needed —
-this milestone would work against **stock Audio-edition firmware**.
+it would work against **stock Audio-edition firmware**.
+
+Built, and on hardware it transferred badly, so the mod no longer acts on panel
+events (`CONTROL_AVAILABLE` in `mod.lua`) whatever a saved config says. The
+routing is kept and still tested. See
+[below](#panel-knobs-driving-norns-off-until-understood).
 
 **Exit:** turning panel knob 2 moves the same thing norns encoder 2 moves.
 
-## M2 — The mirror ✅ *code written, not yet run on hardware*
+## M2 — The mirror ✅ *on hardware*
 
-The norns screen on the panel, in 16 grey levels, no script changes.
+The norns screen on the panel, in all 16 grey levels, no script changes.
 
 **Exit:** any script's screen appears on the panel; the panel returns to its
 pattern within a second of the mirror stopping.
 
-## M3 — Hue ✅ *code written, not yet run on hardware*
+## M3 — Hue ✅ *on hardware*
 
 Panel knob 4 tints the mirror; norns's grey survives as the value channel;
 knob at home = plain white. Native Patternflow brightness stays the brightness
 control.
 
 **Exit:** a shaded, single-hue mirror whose colour you dial from the panel.
-
-> M0–M3 are all implemented and tested offline (88 assertions, plus a firmware
-> build whose composition is verified in the shipped bytes). What none of them
-> have is a panel and a norns in the same room. That is the next real step, and
-> [the install guide's bring-up section](00-install.md#part-3--bring-up) is
-> written for it.
 
 ---
 
@@ -101,11 +95,38 @@ the interesting work is aesthetic rather than structural.
 
 ## Open, parked
 
-Nothing at present.
+### Grey levels: the wire is done, the look is not
 
-**Closed 2026-09-28:** one panel doubled a row pair under the mirror. It was
-the panel; a replacement does not do it.
-[06-row-ghosting.md](06-row-ghosting.md) keeps the diagnosis.
+The wire carries all 16 levels since firmware v0.4.0
+([02-wire-protocol.md](02-wire-protocol.md#the-payload)), and the mirror is
+stable. Anti-aliased shapes — circles, diagonals, soft edges — still look less
+natural than on the OLED, because their dim edge pixels nearly vanish on the
+LEDs ([why](06-hardware-findings.md#the-picture-is-close-not-identical)). The
+current state is kept; if it is picked up again, cheapest first:
+
+- **A per-level brightness table** in `buildPalette()` (`core_screencast.h`)
+  in place of `v = lvl / 15`, lifting the low levels so they survive the
+  driver's CIE1931 curve. Tune it by eye with the mod's `ramp` card held next
+  to the OLED: every band should be distinguishable, in the same order.
+- **Ordered dithering** on the panel, if the dimmest levels cannot be made
+  distinct on their own.
+
+### Panel knobs driving norns: off until understood
+
+[M1](#m1--the-panel-as-a-norns-controller--switched-off) is off. The "norns
+appears to hang" part was very likely the name-lookup freeze, since fixed
+([findings](06-hardware-findings.md#norns-froze-with-the-mod-enabled--name-lookups)),
+so it is worth a second try. Before turning it back on, check what is left:
+lost or late OSC datagrams (each detent is two of them, `delta` and `clicks`);
+the panel applying the same turn to its own pattern; matron's input path under
+mirror load; an encoder acceleration mismatch. The handshake stays either way,
+so the panel still knows where norns is and the menu still shows `linked`.
+
+### Closed
+
+In [06-hardware-findings.md](06-hardware-findings.md): a doubled row pair
+(a faulty panel), patterns refused for memory (fixed upstream in core 3.10.5
+and 3.11.0), and the norns freeze (fixed in the mod).
 
 ---
 

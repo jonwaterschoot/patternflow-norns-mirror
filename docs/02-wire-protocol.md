@@ -44,9 +44,22 @@ learn anyway.
 So the two halves of the setup are: norns pings (this message), and the
 firmware is built with `PF_OSC_REMOTE_PORT 10111`. Neither works alone.
 
+Every message in every direction is sent to the panel's **IP**, never its
+name. matron resolves a name again on each send, blocking, and a name that has
+stopped resolving freezes norns
+([01-verified-facts.md](01-verified-facts.md#osc-on-norns)). The mod looks
+`host` up once in a child process, sends nothing until it has an answer, and
+from then on follows the source address of the panel's own packets.
+
 ---
 
 ## 2. Control — panel → norns, port 10111
+
+> **Switched off in the mod, 2026-10-04.** The panel still sends these once
+> it has been pinged, and norns still receives them, but the mod no longer
+> acts on them (`CONTROL_AVAILABLE` in `mod.lua`). It transferred badly on
+> hardware; see [the roadmap](04-roadmap.md#open-parked). What follows is
+> what it does when turned back on.
 
 Stock Patternflow output, no firmware change. The mod translates it to norns's
 own built-in remote-control vocabulary.
@@ -91,16 +104,26 @@ without a second code path.
 
 ### The payload
 
-One character per **pixel pair**, packed as `a * 8 + b` into a 64-character
-alphabet, where `a` and `b` are 3-bit grey levels, row-major from the top-left:
+All 16 of norns's grey levels. **Two characters per pixel triple**: three
+4-bit greys `a b c` make the 12-bit value `a*256 + b*16 + c`, sent as its high
+six bits then its low six, each into a 64-character alphabet, row-major from
+the top-left:
 
 ```
 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz+-
 ```
 
-With the mod's `nchunks = 4` each chunk carries 2048 pixels — exactly 16 rows —
-as 1024 characters, and the datagram lands around 1060 bytes: comfortably
-inside a 1500-byte MTU, no IP fragmentation.
+16³ = 64², so the packing wastes nothing. With the mod's `nchunks = 4` each
+chunk carries 2048 pixels — exactly 16 rows. 2048 is not a multiple of 3, so
+the mod pads each band with **one** zero pixel to 2049 = 683 triples, 1366
+characters, and the panel ignores the pad. The datagram is 1392 bytes: under
+the 1472 a 1500-byte MTU carries, so no IP fragmentation.
+
+The panel also accepts the **older 8-level encoding** — one character per pixel
+pair, `a*8 + b` with 3-bit greys, 1024 characters a band — and widens it onto
+0–15. The two are told apart by length alone. That is what lets the firmware
+be flashed before the mod is updated; `/api/status` → `screencast.levels`
+says which one is arriving (`16`, `8`, or `0` before the first chunk).
 
 Three properties, each of which bought something:
 
@@ -113,12 +136,13 @@ next change or until the mod's two-second full refresh comes round.
 compares. A static norns screen sends no chunks at all; typing in the parameter
 menu sends one.
 
-**Encoding is a single pass in C.** `screen.peek` hands back 8192 bytes and the
-mod converts them with one `string.gsub(buf, "..", table)` against a 256-entry
-table keyed by the two-byte pair. The per-pixel work never enters the Lua
-interpreter, which is the whole reason a pure-Lua mirror is viable.
+**Encoding is a single pass in C.** `screen.peek` hands back 8192 bytes, and
+the mod converts each band with one `string.gsub(band .. pad, "...", table)`
+against a 4096-entry table keyed by the three-byte triple, built once at
+startup. The per-pixel work never enters the Lua interpreter, which is the
+whole reason a pure-Lua mirror is viable.
 
-### Why 8 grey levels and not 16
+### How it got to 16 levels at four datagrams
 
 The first version sent one hex character per pixel and kept all 16 of norns's
 levels. On hardware, moving content lagged. The cost was not the bytes so much
@@ -126,15 +150,17 @@ as the **datagram count**: matron builds a fresh `lo_address` for every
 `osc.send`, so each datagram is its own socket open, sendto and close. Eight
 per frame at 20 fps is 160 of those a second.
 
-Pairing pixels halves it to four. Keeping 16 levels in a pair would need 256
-symbols — the high half of the byte range, outside OSC's "non-null ASCII", sent
-through a liblo we do not control. 8 levels is the honest trade, and norns's UI
-is mostly full-on, full-off and a few dim greys.
+The second packed pixel *pairs* into one character, which halved it to four,
+but a pair of 16-level pixels needs 256 symbols — the high half of the byte
+range, outside OSC's "non-null ASCII", through a liblo we do not control. So it
+dropped to 8 levels, and every gradient on norns came across as 8 bands.
 
-Three pixels in two characters would keep all 16 levels at the same size
-(16³ = 64² exactly), but 3 divides neither a 128-pixel row nor a 64-row screen,
-so no chunking lines up with it. That is the only reason it is not what this
-does.
+Triples keep 16 levels at the same datagram count. They were passed over at
+first because 3 divides neither a 128-pixel row nor a 64-row screen, so no
+chunking lines up with them. Nothing needs to: a triple only has to line up
+with its own band, and one pad pixel per band does that. The price is 30 %
+more bytes per chunk (1366 characters against 1024), which is not the cost
+that mattered.
 
 ### `/pf/scr/end` — frame complete
 
