@@ -12,9 +12,17 @@ ESP32-S3 with four push-encoders.
 Both screens are 128 × 64. That is the coincidence the whole project started with
 — a norns frame maps to the panel one pixel to one pixel, with no scaling.
 
-As of the current state I'm still not 100% convinced with the quality of the mirrored image,
-the lack of aliasing is making some things look bad.
-However, when I started this I was looking for the ways the devices can communicate, and now that this bridge has been built the first time, I'm thinking about what other options are possible. While I already have the option to use the Patternflows encoders to control the norns encoders, I'm more thinking towards a unique combo of scripts to have a script on norns that works in conjunction with Patternflow in a way beyond mere mirroring. TBC.
+### My issues with the current build
+
+As of the current state I'm still not 100% convinced with the quality of the mirrored image.
+The way aliasing is (not) handled is making some things look bad. Rounded shapes and gradients suffer the most. The grayscale levels itself are translated ok. The monochrome color can be changed on PF with K4, brightness is set with normal PF input: push and hold K1.
+Enabling the knobs to work as the controls of the norns causes conflicts, and the lack of pushbuttons doesn't make a lot of sense to use PF as a standalone way to control norns.
+
+### Currently it's a mirror, I'd like to expand the options
+
+When I started this I was looking for the ways the devices can communicate, and now that this bridge has been built the first time, I'm thinking about what other options are possible. While I already have the option to use the Patternflow encoders to control the norns encoders, I'm more thinking towards a unique combo of back and forth. E.g. a script on norns that works in conjunction with Patternflow, patternflow could display an animation while the normal scripts interface UI is on the norns screen. So I'm thinking of ways beyond mere mirroring. TBC.
+
+### LLM disclaimer
 
 As most will probably read from the look of this repo, it was built using LLM's, mostly Claude.
 
