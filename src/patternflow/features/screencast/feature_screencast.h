@@ -1,7 +1,7 @@
 // ═══════════════════════════════════════════════════════════
 // feature: screencast — the norns screen on the panel
 //
-// Pairs with the norns system mod in src/norns/mod/patternflow/. The mod
+// Pairs with the norns system mod in src/norns/mod/pf-mirror/. The mod
 // reads its own OLED with screen.peek and sends it here; this shows it, in a
 // hue the panel's own knob 4 sets.
 //

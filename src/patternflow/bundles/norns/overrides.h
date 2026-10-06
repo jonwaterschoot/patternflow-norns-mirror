@@ -26,8 +26,15 @@
 //           screencast.rowdup in /api/status
 //   v0.2.1  core v3.10.4: exact 300 Hz refresh, binary bit-plane chain,
 //           white balance back to identity — the mirror looks different
-#define PF_VARIANT "norns"
-#define PF_VARIANT_VERSION "v0.2.1"
+//   v0.3.0  core v3.11.0: module code and data in PSRAM, so a pattern's size
+//           no longer decides whether it loads (docs/06-hardware-findings.md);
+//           parked modules come back instantly after the mirror; 19.5 dBm
+//   v0.4.0  16 grey levels: pixel triples on the wire, the 8-level pairs of
+//           older mods still accepted; screencast.levels in /api/status
+//   v0.5.0  first public release: the edition is "norns-mirror" (was
+//           "norns"), the mod "pf-mirror"; versioned together from here
+#define PF_VARIANT "norns-mirror"
+#define PF_VARIANT_VERSION "v0.5.0"
 
 // ── Where the panel's own OSC goes ──────────────────────────────────────
 //

@@ -7,8 +7,8 @@
 //
 // What this is actually protecting:
 //   - the OSC reader, which is hand-rolled and full of offsets
-//   - the pixel-pair packing, where swapping the two halves would be a
-//     plausible-looking picture with every column wrong
+//   - the pixel packing, triples and the older pairs, where swapping two
+//     slots would be a plausible-looking picture with every column wrong
 //   - double buffering, i.e. that a half-arrived frame never reaches the panel
 //   - float-typed integers, the norns quirk that would otherwise be found
 //     on hardware at the worst moment
@@ -84,10 +84,23 @@ static bool feed(const std::vector<uint8_t>& b) {
   return SC::handleDatagram(b.data(), b.size());
 }
 
-// One character encodes a PIXEL PAIR: a * LEVELS + b into the alphabet.
-static char sym(int a, int b) { return SC::ALPHABET[a * SC::LEVELS + b]; }
+// 16 levels: TWO characters encode a pixel TRIPLE, a*256 + b*16 + c, high
+// six bits first. A band is padded up to whole triples.
+static std::string tri(int a, int b, int c) {
+  const int v = a * 256 + b * 16 + c;
+  return std::string{SC::ALPHABET[v / 64], SC::ALPHABET[v % 64]};
+}
+static size_t triChars(size_t px) { return 2 * ((px + 2) / 3); }
+static std::string fill16(int lvl, size_t px) {
+  std::string out;
+  for (size_t g = 0; g < (px + 2) / 3; g++) out += tri(lvl, lvl, lvl);
+  return out;
+}
+
+// 8 levels, what older mods send: one character is a PIXEL PAIR, a*8 + b.
+static char sym8(int a, int b) { return SC::ALPHABET[a * 8 + b]; }
 static std::string pairRun(int a, int b, size_t chars) {
-  return std::string(chars, sym(a, b));
+  return std::string(chars, sym8(a, b));
 }
 
 int main() {
@@ -99,56 +112,72 @@ int main() {
   SC::runtimeEnabled = true;
 
   const size_t px = SC::SRC_PX / 4;   // 2048 pixels per chunk
-  const size_t chars = px / 2;        // 1024 characters
+  const size_t chars = triChars(px);  // 1366 characters: 683 triples, one pad
+  const size_t chars8 = px / 2;       // 1024, the older pair encoding
 
-  printf("wire format\n");
-  ok(feed(frameMsg(0, 4, pairRun(7, 7, chars))), "a well-formed chunk 0 is accepted");
-  ok(SC::pending[0] == 7 && SC::pending[1] == 7, "one character decodes to two pixels");
-  ok(SC::pending[px - 1] == 7, "the whole band is written");
-  ok(SC::pending[px] == 0, "the next band is untouched");
+  printf("wire format, 16 levels\n");
+  ok(chars == 1366, "a 2048-pixel band is 1366 characters");
+  ok(feed(frameMsg(0, 4, fill16(15, px))), "a well-formed chunk 0 is accepted");
+  ok(SC::wireLevels == 16, "and status says the mod is sending 16 levels");
+  ok(SC::pending[0] == 15 && SC::pending[1] == 15 && SC::pending[2] == 15,
+     "two characters decode to three pixels");
+  ok(SC::pending[px - 1] == 15, "the whole band is written, to its last pixel");
+  ok(SC::pending[px] == 0, "and the pad does not spill into the next band");
 
-  ok(feed(frameMsg(3, 4, pairRun(4, 4, chars))), "the last chunk is accepted");
-  ok(SC::pending[SC::SRC_PX - 1] == 4, "the last pixel of the panel is written");
-
-  ok(feed(frameMsg(1, 4, pairRun(2, 5, chars), /*asInt=*/true)),
-     "int32-typed args also work");
-  ok(SC::pending[px] == 2 && SC::pending[px + 1] == 5,
-     "the two halves of a pair are not swapped");
+  ok(feed(frameMsg(3, 4, fill16(9, px))), "the last chunk is accepted");
+  ok(SC::pending[SC::SRC_PX - 1] == 9, "the last pixel of the panel is written");
 
   {
-    std::string mixed;
-    for (size_t i = 0; i < chars; i++) {
-      mixed += sym((int)(i % SC::LEVELS), (int)((i / SC::LEVELS) % SC::LEVELS));
-    }
-    ok(feed(frameMsg(2, 4, mixed)), "a mixed-level chunk is accepted");
-    bool allGood = true;
-    for (size_t i = 0; i < 32; i++) {
-      if (SC::pending[2 * px + i * 2] != (uint8_t)(i % SC::LEVELS)) allGood = false;
-      if (SC::pending[2 * px + i * 2 + 1] != (uint8_t)((i / SC::LEVELS) % SC::LEVELS))
-        allGood = false;
-    }
-    ok(allGood, "every level 0-7 round-trips in both halves of the pair");
+    std::string one = tri(1, 2, 3) + fill16(0, px).substr(2);
+    ok(feed(frameMsg(1, 4, one, /*asInt=*/true)), "int32-typed args also work");
+    ok(SC::pending[px] == 1 && SC::pending[px + 1] == 2 && SC::pending[px + 2] == 3,
+       "the three slots of a triple are in order");
   }
+
+  {
+    // Every level through every slot, across the whole band, including the
+    // last triple whose third slot is the pad.
+    std::vector<uint8_t> want(px);
+    for (size_t i = 0; i < px; i++) want[i] = (uint8_t)((i * 7 + i / 3) % 16);
+    std::string enc;
+    for (size_t p = 0; p < px; p += 3) {
+      enc += tri(want[p], p + 1 < px ? want[p + 1] : 0, p + 2 < px ? want[p + 2] : 0);
+    }
+    ok(feed(frameMsg(2, 4, enc)), "a chunk using every level is accepted");
+    ok(memcmp(SC::pending + 2 * px, want.data(), px) == 0,
+       "every level 0-15 round-trips in every slot of the triple");
+  }
+
+  printf("\nwire format, 8 levels from an older mod\n");
+  ok(feed(frameMsg(0, 4, pairRun(7, 7, chars8))), "a 1024-character chunk is still accepted");
+  ok(SC::wireLevels == 8, "and status says the mod is the old one");
+  ok(SC::pending[0] == 15 && SC::pending[px - 1] == 15, "its top level is the top level");
+  ok(feed(frameMsg(1, 4, pairRun(2, 5, chars8))), "a mixed pair is accepted");
+  ok(SC::pending[px] == 4 && SC::pending[px + 1] == 11,
+     "the halves are not swapped, and 0-7 is widened onto 0-15");
+  ok(feed(frameMsg(1, 4, pairRun(0, 4, chars8))) && SC::pending[px] == 0 &&
+         SC::pending[px + 1] == 9,
+     "black stays black, and the middle lands in the middle");
 
   printf("\ndouble buffering — the fix for banded tearing\n");
   {
     memset(SC::levels, 0, SC::SRC_PX);
     memset(SC::pending, 0, SC::SRC_PX);
-    ok(feed(frameMsg(0, 4, pairRun(7, 7, chars))), "a chunk arrives");
+    ok(feed(frameMsg(0, 4, fill16(15, px))), "a chunk arrives");
     ok(SC::levels[0] == 0, "and is NOT shown yet — no half-drawn frame reaches the panel");
-    ok(SC::pending[0] == 7, "it waits in the back buffer");
+    ok(SC::pending[0] == 15, "it waits in the back buffer");
     ok(feed(endMsg()), "the frame-complete marker is accepted");
-    ok(SC::levels[0] == 7, "which publishes the whole frame at once");
+    ok(SC::levels[0] == 15, "which publishes the whole frame at once");
 
-    ok(feed(frameMsg(1, 4, pairRun(3, 3, chars))), "a later frame changes one band");
+    ok(feed(frameMsg(1, 4, fill16(3, px))), "a later frame changes one band");
     ok(feed(endMsg()), "and completes");
-    ok(SC::levels[0] == 7, "the band that did not change is still there");
+    ok(SC::levels[0] == 15, "the band that did not change is still there");
     ok(SC::levels[px] == 3, "the band that did is updated");
   }
 
   printf("\nkeepalive and liveness\n");
   g_millis = 5000;
-  ok(feed(frameMsg(0, 4, pairRun(7, 7, chars))), "a frame refreshes liveness");
+  ok(feed(frameMsg(0, 4, fill16(15, px))), "a frame refreshes liveness");
   ok(SC::active(), "the mirror is active right after a packet");
   g_millis = 5000 + PF_SCREENCAST_TIMEOUT_MS + 1;
   ok(!SC::active(), "the mirror goes idle after the timeout");
@@ -158,22 +187,28 @@ int main() {
   printf("\nmalformed input is refused, not obeyed\n");
   {
     memset(SC::pending, 1, SC::SRC_PX);
-    std::string bad = pairRun(7, 7, chars);
+    std::string bad = fill16(15, px);
     bad[chars - 1] = '~';   // not in the alphabet
     ok(!feed(frameMsg(0, 4, bad)), "a symbol outside the alphabet is rejected");
     bool untouched = true;
     for (size_t i = 0; i < px; i++) if (SC::pending[i] != 1) untouched = false;
     ok(untouched, "and not one pixel was written before the refusal");
 
-    ok(!feed(frameMsg(0, 4, pairRun(7, 7, chars - 1))), "a short payload is rejected");
-    ok(!feed(frameMsg(0, 4, pairRun(7, 7, chars + 1))), "a long payload is rejected");
-    ok(!feed(frameMsg(4, 4, pairRun(7, 7, chars))), "an out-of-range chunk index is rejected");
-    ok(!feed(frameMsg(-1, 4, pairRun(7, 7, chars))), "a negative chunk index is rejected");
-    ok(!feed(frameMsg(0, 3, pairRun(7, 7, chars))),
+    std::string bad8 = pairRun(7, 7, chars8);
+    bad8[0] = '~';
+    ok(!feed(frameMsg(0, 4, bad8)), "the same goes for the older encoding");
+
+    ok(!feed(frameMsg(0, 4, fill16(15, px).substr(1))), "a short payload is rejected");
+    ok(!feed(frameMsg(0, 4, fill16(15, px) + "0")), "a long payload is rejected");
+    ok(!feed(frameMsg(0, 4, pairRun(7, 7, chars8 + 1))),
+       "a length that is neither encoding is rejected");
+    ok(!feed(frameMsg(4, 4, fill16(15, px))), "an out-of-range chunk index is rejected");
+    ok(!feed(frameMsg(-1, 4, fill16(15, px))), "a negative chunk index is rejected");
+    ok(!feed(frameMsg(0, 3, fill16(15, px))),
        "an nchunks that does not divide the panel is rejected");
-    ok(!feed(frameMsg(0, 0, pairRun(7, 7, chars))),
+    ok(!feed(frameMsg(0, 0, fill16(15, px))),
        "nchunks of zero is rejected (no divide by zero)");
-    ok(!feed(frameMsg(0, 999, pairRun(7, 7, chars))), "an absurd nchunks is rejected");
+    ok(!feed(frameMsg(0, 999, fill16(15, px))), "an absurd nchunks is rejected");
 
     std::vector<uint8_t> other;
     pushStr(other, "/patternflow/knob/1/delta");
@@ -183,7 +218,7 @@ int main() {
 
     // Truncation at every length must not read past the end. Under a
     // sanitizer a single overrun here fails the run.
-    std::vector<uint8_t> full = frameMsg(0, 4, pairRun(7, 7, chars));
+    std::vector<uint8_t> full = frameMsg(0, 4, fill16(15, px));
     for (size_t n = 0; n < full.size(); n++) SC::handleDatagram(full.data(), n);
     ok(true, "every truncation of a valid packet is handled without overrun");
 
@@ -198,7 +233,7 @@ int main() {
   {
     memset(SC::pending, 0, SC::SRC_PX);
     const size_t px8 = SC::SRC_PX / 8;
-    ok(feed(frameMsg(5, 8, pairRun(6, 6, px8 / 2))), "an 8-chunk frame is accepted");
+    ok(feed(frameMsg(5, 8, fill16(6, px8))), "an 8-chunk frame is accepted");
     ok(SC::pending[5 * px8] == 6 && SC::pending[6 * px8 - 1] == 6,
        "chunk 5 of 8 covers exactly its own band");
     ok(SC::pending[5 * px8 - 1] == 0, "nothing before it");
@@ -208,9 +243,9 @@ int main() {
   printf("\ncompose\n");
   {
     memset(SC::levels, 0, SC::SRC_PX);
-    SC::levels[0] = 7;   // full white
+    SC::levels[0] = 15;  // full white
     SC::levels[1] = 0;   // black
-    SC::levels[2] = 4;   // mid
+    SC::levels[2] = 8;   // mid
     g_millis = 20000;
     SC::lastPacketMs = g_millis;
     SC::chromeUp = false;
@@ -357,7 +392,7 @@ int main() {
     // equal, so this must find nothing — which is what makes it able to prove
     // that doubling seen on the panel happened after the data arrived.
     for (int y = 0; y < SC::SRC_H; y++) {
-      memset(SC::levels + (size_t)y * SC::SRC_W, (y % 2) ? 0 : 7, SC::SRC_W);
+      memset(SC::levels + (size_t)y * SC::SRC_W, (y % 2) ? 0 : 15, SC::SRC_W);
     }
     SC::rowDupStats(&count, &first);
     ok(count == 0, "alternating rows report no duplicate pairs");
@@ -393,6 +428,8 @@ int main() {
        "status starts with a leading comma, as the hook asks");
     ok(s.back() == '}', "status is balanced");
     ok(s.find("\"port\":9002") != std::string::npos, "status reports the port");
+    ok(s.find("\"levels\":") != std::string::npos,
+       "and which encoding the mod is sending");
   }
 
   printf("\n%d passed, %d failed\n", passed, failed);

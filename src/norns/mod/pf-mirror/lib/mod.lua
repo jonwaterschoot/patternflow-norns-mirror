@@ -1,25 +1,48 @@
--- patternflow — norns ⇄ Patternflow bridge (system mod)
+-- pf-mirror — the norns screen on a Patternflow panel (system mod)
 --
--- Three jobs, each independently switchable from the mod menu:
+-- Unofficial: a personal project, not affiliated with or endorsed by
+-- Patternflow or monome. https://github.com/jonwaterschoot/patternflow-norns-mirror
 --
---   control   the panel's encoders and buttons drive norns as if they were
---             the physical ones. Works under every script, changes none.
+-- Three jobs:
+--
 --   mirror    the norns screen is sent to the panel's `screencast` feature.
---   handshake tells the panel where we are, so its own OSC output finds us.
+--   handshake tells the panel where we are, so its own OSC output finds us,
+--             and is how the menu knows whether a panel is there at all.
+--   control   the panel's encoders and buttons drive norns as if they were
+--             the physical ones. SWITCHED OFF for now — see CONTROL_AVAILABLE.
 --
 -- All of it is plain Lua. No native build, no norns fork.
 -- The facts this is written against are in docs/01-verified-facts.md.
 --
--- Install: copy this directory to ~/dust/code/patternflow/ on norns, then
--- SYSTEM > MODS > patternflow > enable, and restart.
+-- Install: this directory goes to ~/dust/code/pf-mirror/ on norns, then
+-- SYSTEM > MODS > PF-MIRROR, turn E3 right, and restart. The README has a
+-- one-line install from maiden.
 
 local mod = require 'core/mods'
 local tab = require 'tabutil'
 local util = require 'util'
 
-local this_name = mod.this_name or "patternflow"
+local this_name = mod.this_name or "pf-mirror"
+
+-- Must match PF_VARIANT_VERSION in the firmware's overrides.h: the two halves
+-- are released together, and tools/release.sh refuses to cut one where they
+-- disagree.
+local VERSION = "v0.5.0"
 
 local pf = {}
+
+-- Panel knobs and buttons driving norns. Off, and not offered in the menu.
+--
+-- On hardware it transferred badly: turns arrived wrong or not at all, and at
+-- times norns appeared to hang or to be fighting the panel for the same input.
+-- Until that is understood the mod does one thing — the mirror — and does it
+-- well. The routing is kept intact below, and still tested, so turning this
+-- back on is this one line.
+--
+-- It is a constant rather than just a new default for config.control because
+-- config is saved on norns: every unit that ran an earlier version has
+-- `control = true` in its config file, and that would win over any default.
+local CONTROL_AVAILABLE = false
 
 -- ─────────────────────────────────────────────────────────────────────────
 -- Configuration
@@ -39,7 +62,7 @@ local config = {
   osc_port = 9001,   -- PF_OSC_LOCAL_PORT: the panel's OSC feature listens here
   scr_port = 9002,   -- PF_SCREENCAST_PORT: our feature's own socket
 
-  control = true,
+  control = false,   -- only consulted while CONTROL_AVAILABLE is true
   mirror = true,
 
   fps = 20,          -- mirror cap; the screen rarely changes faster than this
@@ -77,29 +100,29 @@ end
 -- translation table converts the whole buffer in one pass inside C, and the
 -- per-pixel work never enters the interpreter.
 --
--- TWO pixels per character, at 8 grey levels. The first hardware test showed
--- moving content tearing and lagging, and the cost was dominated by the
--- number of datagrams: matron builds a fresh lo_address per osc.send, so
--- every datagram is its own socket open/sendto/close. Halving the payload
--- halves the datagrams — 4 per frame instead of 8 — and that is the lever
--- that mattered, more than the bytes themselves.
+-- Sixteen grey levels, THREE pixels in TWO characters. 16^3 == 64^2, so a
+-- triple of 4-bit greys is exactly two symbols of a 64-character alphabet,
+-- which keeps everything 7-bit ASCII — what OSC says a string is, through a
+-- liblo we do not control.
 --
--- The pair is packed as (a>>1)*8 + (b>>1) into a 64-character alphabet, so
--- everything stays 7-bit ASCII, which is what OSC says a string is. Keeping
--- all 16 levels would need 256 symbols for a pair — the high half of the byte
--- range, outside the spec, through a liblo we do not control. 8 levels is the
--- honest trade and norns's UI is mostly full-on, full-off and a few dim greys.
+-- The cost that matters is the number of datagrams, not their size: matron
+-- builds a fresh lo_address per osc.send, so every datagram is its own socket
+-- open/sendto/close, and the first hardware test tore and lagged on that. So
+-- the frame stays at 4 datagrams. Each band of 2048 pixels gets ONE padding
+-- pixel to make 683 whole triples, 1366 characters, 1392 bytes on the wire:
+-- under the 1472 a 1500-byte MTU carries without fragmenting.
 --
--- (Three pixels in two characters would keep 16 levels at the same size —
--- 16^3 == 64^2 exactly — but 3 does not divide a 128-pixel row or a 64-row
--- screen, so no chunking lines up with it. That is the only reason it is not
--- what this does.)
+-- Until 2026-10 this sent 8 levels, two pixels per character, because 3 does
+-- not divide a row and so no chunking lines up with triples. Padding each band
+-- is the answer to that: a triple never has to line up with a row, only with
+-- its own band. 8 levels turned every gradient on norns into 8 bands.
 -- ─────────────────────────────────────────────────────────────────────────
 
 local W, H = 128, 64
 local CHUNKS = 4                          -- 4 datagrams per frame
 local CHUNK_PX = (W * H) / CHUNKS         -- 2048 px = 16 rows
-local CHUNK_CHARS = CHUNK_PX / 2          -- 1024 chars, ~1060 bytes on the wire
+local PAD = string.rep(string.char(0), (3 - CHUNK_PX % 3) % 3)
+local CHUNK_CHARS = (CHUNK_PX + #PAD) / 3 * 2    -- 1366
 local FULL_REFRESH_S = 2.0                -- re-send everything this often, so a
                                           -- panel that joined late or dropped a
                                           -- packet always heals
@@ -107,13 +130,96 @@ local FULL_REFRESH_S = 2.0                -- re-send everything this often, so a
 local ALPHABET =
   "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz+-"
 
--- Keyed by the two-byte string, so gsub("..", xlat2) does the lookup in C.
-local xlat2 = {}
+-- Keyed by the three-byte string, so gsub("...", xlat3) does the lookup in C.
+-- 4096 entries, built once.
+local xlat3 = {}
 for a = 0, 15 do
   for b = 0, 15 do
-    local idx = math.floor(a / 2) * 8 + math.floor(b / 2)
-    xlat2[string.char(a) .. string.char(b)] = ALPHABET:sub(idx + 1, idx + 1)
+    for c = 0, 15 do
+      local v = a * 256 + b * 16 + c
+      local hi, lo = math.floor(v / 64), v % 64
+      xlat3[string.char(a, b, c)] =
+        ALPHABET:sub(hi + 1, hi + 1) .. ALPHABET:sub(lo + 1, lo + 1)
+    end
   end
+end
+
+-- 8192 bytes of 0-15 in, CHUNKS payloads out (indexed from 0), or nil if one
+-- came out the wrong length.
+--
+-- gsub leaves a match alone when the table has no entry for it, which would
+-- silently change the payload's length and get every chunk rejected at the far
+-- end. xlat3 covers all 4096 triples and screen_peek masks to 0-15, so this
+-- cannot happen — but it is the one failure that would look like a dead mirror
+-- with no error anywhere, so it says so once rather than never.
+local warned_length = false
+
+local function encode(px)
+  local out = {}
+  for c = 0, CHUNKS - 1 do
+    local a = c * CHUNK_PX + 1
+    local payload = (px:sub(a, a + CHUNK_PX - 1) .. PAD):gsub("...", xlat3)
+    if #payload ~= CHUNK_CHARS then
+      if not warned_length then
+        warned_length = true
+        print("pf-mirror: encoded chunk is " .. #payload .. " chars, expected " ..
+              CHUNK_CHARS .. " — the panel will reject these")
+      end
+      return nil
+    end
+    out[c] = payload
+  end
+  return out
+end
+
+-- ─────────────────────────────────────────────────────────────────────────
+-- Where the panel is
+--
+-- osc.send must never be given a host NAME. matron's osc_send builds a fresh
+-- lo_address for every message and frees it after (matron/src/osc.cc), so
+-- liblo resolves the name again on every send, on the Lua thread, blocking.
+-- When `patternflow.local` stops resolving (the panel rebooting into new
+-- firmware, off the network, up as its own hotspot) each lookup takes seconds
+-- to fail. The mirror sends up to nine messages a second, so norns falls
+-- further behind than it can ever catch up: the screen, the encoders and the
+-- menus all freeze, and the only way out is to remove the mod. That was the
+-- "norns appears to hang" on hardware, blamed at first on the knobs.
+--
+-- So the name is resolved once, by `getent` in a child process through
+-- norns.system_cmd, which answers by callback and never blocks Lua. Until it
+-- has answered NOTHING is sent. A literal IP in `host` skips all of it. The
+-- panel's own packets carry its address too, so once it talks to us we have
+-- it whether or not mDNS works from norns.
+-- ─────────────────────────────────────────────────────────────────────────
+
+local panel_ip = nil          -- an IPv4 string, or nil: send nothing
+local resolving = false
+local handshake               -- defined with the handshake below
+
+local function is_ipv4(s)
+  return type(s) == "string" and s:match("^%d+%.%d+%.%d+%.%d+$") ~= nil
+end
+
+local function resolve()
+  local host = config.host
+  if is_ipv4(host) then panel_ip = host return end
+  if resolving then return end
+  -- It goes into a shell command line, so only what a host name can contain.
+  if type(host) ~= "string" or not host:match("^[%w%.%-]+$") then
+    print("pf-mirror: host '" .. tostring(host) .. "' is not a host name")
+    return
+  end
+  resolving = true
+  norns.system_cmd("getent ahostsv4 " .. host, function(out)
+    resolving = false
+    if config.host ~= host then return end   -- changed while we waited
+    local ip = type(out) == "string" and out:match("^(%d+%.%d+%.%d+%.%d+)")
+    if ip then
+      local first = (panel_ip == nil)
+      panel_ip = ip
+      if first and handshake then handshake() end
+    end
+  end)
 end
 
 local last_chunk = {}   -- what the panel is believed to be showing
@@ -126,14 +232,15 @@ local last_send = 0
 -- in one go rather than band by band (this is what fixes the tearing), and
 -- refresh liveness so the panel does not hand itself back to its pattern.
 local function frame_end()
-  osc.send({ config.host, config.scr_port }, "/pf/scr/end")
+  if not panel_ip then return end
+  osc.send({ panel_ip, config.scr_port }, "/pf/scr/end")
 end
 
-local function send_frame(chars, force)
-  local dest = { config.host, config.scr_port }
+local function send_frame(payloads, force)
+  if not panel_ip then return end
+  local dest = { panel_ip, config.scr_port }
   for c = 0, CHUNKS - 1 do
-    local a = c * CHUNK_CHARS + 1
-    local payload = chars:sub(a, a + CHUNK_CHARS - 1)
+    local payload = payloads[c]
     if force or last_chunk[c] ~= payload then
       last_chunk[c] = payload
       -- Each datagram is a complete statement about its own band of rows, so
@@ -161,6 +268,11 @@ end
 --   line   one lit row, position set by `line y` in the menu. Move it and
 --          watch whether the doubling follows: at every position it is
 --          systematic, at one position it is specific to those rows.
+--   ramp   all 16 grey levels as bands 8 px wide, rising left to right on the
+--          top half and falling on the bottom, so every level sits beside its
+--          neighbours and the two ends meet in the middle. Hold it next to the
+--          norns screen: two bands that look the same on the panel and not on
+--          the OLED were lost to the panel's brightness curve, not the wire.
 --
 -- The panel side answers the same question from the other end: /api/status
 -- reports `rowdup`, how many adjacent row pairs are byte-identical in the
@@ -168,73 +280,71 @@ end
 -- and you can still see doubling, the data arrived correct and the panel is
 -- what doubled it.
 
-local TEST_MODES = { "off", "diag", "rows", "line" }
+local TEST_MODES = { "off", "diag", "rows", "line", "ramp" }
 local test_mode = 1      -- index into TEST_MODES
 local test_line = 5      -- the row `line` lights; 5 by default, the reported one
-local test_chars = nil
+local test_px = nil      -- the card as raw pixels, encoded like any frame
 
-local function build_test_chars()
-  if TEST_MODES[test_mode] == "off" then test_chars = nil return end
-  local px = {}
+local function build_test_px()
   local mode = TEST_MODES[test_mode]
+  if mode == "off" then test_px = nil return end
+  local rows = {}
   for y = 0, H - 1 do
-    local fill = 0
-    if mode == "rows" then
-      fill = (y % 2 == 0) and 15 or 0
-    elseif mode == "line" then
-      fill = (y == test_line) and 15 or 0
-    elseif mode == "diag" then
-      fill = (y % 16 == 0) and 2 or 0
+    local row
+    if mode == "ramp" then
+      local cells = {}
+      for band = 0, 15 do
+        local lvl = (y < H / 2) and band or (15 - band)
+        cells[band + 1] = string.rep(string.char(lvl), W / 16)
+      end
+      row = table.concat(cells)
+    else
+      local fill = 0
+      if mode == "rows" then
+        fill = (y % 2 == 0) and 15 or 0
+      elseif mode == "line" then
+        fill = (y == test_line) and 15 or 0
+      elseif mode == "diag" then
+        fill = (y % 16 == 0) and 2 or 0
+      end
+      row = string.rep(string.char(fill), W)
+      if mode == "diag" then
+        local x = (y * 2) % W
+        row = row:sub(1, x) .. string.char(15) .. row:sub(x + 2)
+      end
     end
-    local row = string.rep(string.char(fill), W)
-    if mode == "diag" then
-      local x = (y * 2) % W
-      row = row:sub(1, x) .. string.char(15) .. row:sub(x + 2)
-    end
-    px[y + 1] = row
+    rows[y + 1] = row
   end
-  test_chars = (table.concat(px):gsub("..", xlat2))
+  test_px = table.concat(rows)
 end
 
 local function test_card_active()
   return TEST_MODES[test_mode] ~= "off"
 end
-local warned_length = false
 
 local function mirror_frame()
   local now = util.time()
   if now - last_send < frame_period then return end
   last_send = now
 
-  local chars
+  local px
   if test_card_active() then
-    if not test_chars then build_test_chars() end
-    chars = test_chars
+    if not test_px then build_test_px() end
+    px = test_px
   else
     local ok, buf = pcall(screen.peek, 0, 0, W, H)
     if not ok or type(buf) ~= "string" or #buf < W * H then return end
-    chars = (buf:gsub("..", xlat2))
+    px = buf
   end
-  if not chars then return end
+  if not px then return end
 
-  -- gsub leaves a match alone when the table has no entry for it, which would
-  -- silently lengthen the payload and get every chunk rejected at the far end.
-  -- xlat2 covers all 256 pairs and screen_peek masks to 0-15, so this cannot
-  -- happen — but it is the one failure that would look like a dead mirror with
-  -- no error anywhere, so it says so once rather than never.
-  if #chars ~= (W * H) / 2 then
-    if not warned_length then
-      warned_length = true
-      print("patternflow: encoded frame is " .. #chars .. " chars, expected " ..
-            (W * H) / 2 .. " — the panel will reject these")
-    end
-    return
-  end
+  local payloads = encode(px)
+  if not payloads then return end
 
   local force = (now - last_full) >= FULL_REFRESH_S
   if force then last_full = now end
 
-  send_frame(chars, force)
+  send_frame(payloads, force)
 end
 
 
@@ -251,8 +361,9 @@ end
 
 local heard_from_panel = 0
 
-local function handshake()
-  osc.send({ config.host, config.osc_port }, "/patternflow/ping")
+handshake = function()
+  if not panel_ip then return end
+  osc.send({ panel_ip, config.osc_port }, "/patternflow/ping")
 end
 
 -- ─────────────────────────────────────────────────────────────────────────
@@ -263,10 +374,16 @@ end
 -- no script has to know this mod exists.
 -- ─────────────────────────────────────────────────────────────────────────
 
-local function handle_osc(path, args)
+local function handle_osc(path, args, from)
   if path:sub(1, 12) ~= "/patternflow" then return end
   heard_from_panel = util.time()
-  if not config.control then return end
+  -- The panel only talks to us once it has been pinged, so this is our panel,
+  -- and its source address is the one thing mDNS cannot get wrong. A host the
+  -- user typed in as an IP stays theirs.
+  if from and is_ipv4(from[1]) and not is_ipv4(config.host) then
+    panel_ip = from[1]
+  end
+  if not (CONTROL_AVAILABLE and config.control) then return end
 
   local n, ev = path:match("^/patternflow/knob/(%d+)/(%a+)$")
   if n then
@@ -317,7 +434,7 @@ local function wrap_screen()
     inner(...)              -- the local screen first: never make it wait on us
     if config.mirror then
       local ok, err = pcall(mirror_frame)
-      if not ok then print("patternflow: mirror error: " .. tostring(err)) end
+      if not ok then print("pf-mirror: mirror error: " .. tostring(err)) end
     end
   end
   -- If the screensaver isn't holding it, point the live field at the wrapper.
@@ -333,8 +450,8 @@ local function wrap_osc()
   -- any script redefining osc.event — which scripts routinely do.
   local inner = _norns.osc.event
   _norns.osc.event = function(path, args, from)
-    local ok, err = pcall(handle_osc, path, args)
-    if not ok then print("patternflow: osc error: " .. tostring(err)) end
+    local ok, err = pcall(handle_osc, path, args, from)
+    if not ok then print("pf-mirror: osc error: " .. tostring(err)) end
     if inner then inner(path, args, from) end
   end
 end
@@ -357,16 +474,21 @@ end
 local function ensure_metro()
   ping_metro = metro[config.metro_id]
   if not ping_metro then
-    print("patternflow: metro " .. tostring(config.metro_id) ..
+    print("pf-mirror: metro " .. tostring(config.metro_id) ..
           " does not exist; the mirror will time out when idle")
     return
   end
   ping_metro.event = function(stage)
     if config.mirror then
       local ok, err = pcall(frame_end)
-      if not ok then print("patternflow: keepalive error: " .. tostring(err)) end
+      if not ok then print("pf-mirror: keepalive error: " .. tostring(err)) end
     end
+    -- Every 5 s while the panel is silent: look the name up again (it may
+    -- have come back, or moved to another address) and ping. Both are
+    -- harmless when there is nothing there — the lookup is in another
+    -- process and a ping without an address is not sent.
     if stage % 20 == 0 and util.time() - heard_from_panel > 10 then
+      resolve()
       handshake()
     end
   end
@@ -378,6 +500,7 @@ mod.hook.register("system_post_startup", this_name .. "-startup", function()
   frame_period = 1 / math.max(1, config.fps)
   wrap_osc()
   wrap_screen()
+  resolve()       -- a literal IP pings now; a name pings when getent answers
   handshake()
   ensure_metro()
 end)
@@ -401,14 +524,18 @@ end)
 local m = {}
 local sel = 1
 local items = {
-  { label = "control", kind = "bool",  key = "control" },
   { label = "mirror",  kind = "bool",  key = "mirror" },
   { label = "fps",     kind = "int",   key = "fps", min = 1, max = 40 },
   { label = "host",    kind = "text",  key = "host" },
   { label = "test",    kind = "test" },
   { label = "line y",  kind = "line" },
-  { label = "re-ping", kind = "action", fn = function() handshake() end },
+  { label = "re-ping", kind = "action", fn = function() resolve() handshake() end },
 }
+-- Six rows is all the screen holds (see redraw). With control offered as well
+-- there were seven, and re-ping was drawn at y=65, off the bottom.
+if CONTROL_AVAILABLE then
+  table.insert(items, 1, { label = "control", kind = "bool", key = "control" })
+end
 
 m.key = function(n, z)
   if z ~= 1 then return end
@@ -421,7 +548,7 @@ m.key = function(n, z)
       config[it.key] = not config[it.key]
     elseif it.kind == "action" and it.fn then
       local ok, err = pcall(it.fn)
-      if not ok then print("patternflow: " .. it.label .. ": " .. tostring(err)) end
+      if not ok then print("pf-mirror: " .. it.label .. ": " .. tostring(err)) end
     end
     mod.menu.redraw()
   end
@@ -434,11 +561,11 @@ m.enc = function(n, d)
     local it = items[sel]
     if it.kind == "test" then
       test_mode = util.clamp(test_mode + d, 1, #TEST_MODES)
-      build_test_chars()
+      build_test_px()
       last_chunk = {}       -- the panel is showing something else entirely
     elseif it.kind == "line" then
       test_line = util.clamp(test_line + d, 0, H - 1)
-      build_test_chars()
+      build_test_px()
       last_chunk = {}
     elseif it.kind == "int" then
       config[it.key] = util.clamp(config[it.key] + d, it.min, it.max)
@@ -455,7 +582,9 @@ m.redraw = function()
   screen.level(4)
   screen.move(0, 8)
   local age = util.time() - heard_from_panel
-  screen.text("patternflow  " .. (age < 10 and "linked" or "no panel"))
+  local state = (not panel_ip) and (resolving and "finding panel" or "no address")
+    or (age < 10 and "linked" or "no panel")
+  screen.text(this_name .. "  " .. state)
   -- 8px pitch from y=17: six rows land at 17..57 and clear the 64px screen.
   -- At the 10px pitch this used the sixth row was drawn off the bottom.
   for i, it in ipairs(items) do
@@ -486,7 +615,9 @@ m.deinit = function() save_config() end
 mod.menu.register(this_name, m)
 
 pf.config = config
-pf.handshake = handshake
+pf.version = VERSION
+pf.handshake = function() handshake() end
+pf.panel_ip = function() return panel_ip end
 
 -- Exposed so the offline tests can drive the menu the way a hand would,
 -- rather than reaching into upvalues. See tools/test_mod.lua.
@@ -494,5 +625,8 @@ pf.menu = m
 pf.items = items
 pf.select = function(i) sel = i end
 pf.test_mode_name = function() return TEST_MODES[test_mode] end
+-- So the tests can prove both that control is off and that the routing it
+-- would turn back on still works. Nothing on norns calls this.
+pf.set_control_available = function(on) CONTROL_AVAILABLE = on end
 
 return pf

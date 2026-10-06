@@ -45,8 +45,10 @@ constexpr int SRC_W = 128;
 constexpr int SRC_H = 64;
 constexpr size_t SRC_PX = (size_t)SRC_W * SRC_H;
 
-// One chunk of 1024 pixels plus address, typetag and two numeric args, padded.
-// 1536 leaves room for a larger chunking scheme without another look at this.
+// The largest datagram the mod sends is a 16-level chunk: 1366 characters
+// plus address, typetag and two numeric args, 1392 bytes in all. 1536 holds
+// it. The real ceiling is 1472, the UDP payload of a 1500-byte MTU: past that
+// a datagram is fragmented, and fragments are a second way to lose a band.
 constexpr size_t RX_CAP = 1536;
 
 inline WiFiUDP udp;
@@ -62,7 +64,7 @@ inline bool runtimeEnabled = true;
 // `pending` has to keep carrying the last full picture. Swapping would leave
 // the back buffer holding the frame before last, and any band that had not
 // changed since would flick between the two. 8 KB per frame is nothing.
-inline uint8_t* levels = nullptr;   // SRC_PX, one 0-7 grey per pixel, on show
+inline uint8_t* levels = nullptr;   // SRC_PX, one 0-15 grey per pixel, on show
 inline uint8_t* pending = nullptr;  // SRC_PX, the frame being assembled
 inline uint8_t* scratch = nullptr;  // SRC_PX * 3, RGB888 handed to the core
 inline uint8_t* rx = nullptr;       // RX_CAP
@@ -71,11 +73,14 @@ inline uint32_t lastPacketMs = 0;
 inline uint32_t framesSeen = 0;
 inline uint32_t chunksSeen = 0;
 inline uint32_t dropped = 0;
+// Which encoding the last accepted chunk used, 8 or 16 (0 = none yet), so
+// /api/status can say whether the mod on the other end is the new one.
+inline uint8_t wireLevels = 0;
 
-// Grey levels on the wire. norns has 16; two of them pack into one 7-bit
-// character only if each is 3 bits, so the mod sends 8 and this renders 8.
-// See the encoding note in the mod for why halving the payload mattered.
-constexpr int LEVELS = 8;
+// Grey levels, as norns has them. Everything from the decoder on is in these
+// 16. The 8-level pair encoding an older mod sends is widened on arrival
+// (widen8()), so the palette and composeFrame have one scale to deal with.
+constexpr int LEVELS = 16;
 
 // Tint. 0 = plain white (the honest monochrome mirror); turning right walks
 // the hue circle. Kept as clicks so the knob has a repeatable home position.
@@ -220,12 +225,26 @@ inline void buildSymbolTable() {
 // Chunk c covers pixels [c*px, (c+1)*px) where px = SRC_PX / nchunks, which
 // for the mod's 4 chunks is 16 whole rows each.
 //
-// The payload is one character per PIXEL PAIR: (a * 8 + b) into ALPHABET,
-// where a and b are 3-bit greys. So a chunk carries px/2 characters.
+// Two payload encodings, told apart by length alone:
+//
+//   16 levels  TWO characters per pixel TRIPLE: a*256 + b*16 + c is 12 bits,
+//              high 6 then low 6 into ALPHABET. 16^3 == 64^2, so nothing is
+//              wasted. A band is not a multiple of 3 pixels (2048 isn't), so
+//              the mod pads it to the next triple and this ignores the pad:
+//              2 * ceil(px / 3) characters, 1366 for a 2048-pixel band.
+//   8 levels   one character per pixel PAIR: a*8 + b, 3-bit greys, px / 2
+//              characters, 1024. What mods before the 16-level change send.
+//              Still accepted, so the firmware can be flashed first.
+//
+// The two lengths never coincide for a band the checks allow.
 //
 // /pf/scr/end says the frame is complete — publish it — and doubles as the
 // liveness beacon, which is why the mod sends it four times a second even
 // when the screen has not changed.
+
+// 0-7 onto 0-15 with both ends exact, rounded in between, so an old mod's
+// picture comes out at the brightness it always had.
+inline uint8_t widen8(int v) { return (uint8_t)((v * 15 + 3) / 7); }
 
 inline void publishFrame() {
   if (!levels || !pending) return;
@@ -258,14 +277,15 @@ inline bool handleDatagram(const uint8_t* buf, size_t len) {
   if (nchunks <= 0 || nchunks > 64) return false;
   if (SRC_PX % (size_t)nchunks) return false;
   const size_t px = SRC_PX / (size_t)nchunks;
-  if (px % 2) return false;  // pixels are packed in pairs
   if (chunk < 0 || (size_t)chunk >= (size_t)nchunks) return false;
 
   const char* payload;
   size_t after;
   if (!oscString(buf, len, pos, &payload, &after)) return false;
-  const size_t chars = px / 2;
-  if (strlen(payload) != chars) return false;
+  const size_t chars = strlen(payload);
+  const bool triples = (chars == 2 * ((px + 2) / 3));
+  // Pairs need an even band; a band that is not cannot be in that format.
+  if (!triples && (px % 2 || chars != px / 2)) return false;
 
   if (!pending) return false;
   if (!symReady) buildSymbolTable();
@@ -279,10 +299,23 @@ inline bool handleDatagram(const uint8_t* buf, size_t len) {
   }
 
   uint8_t* dst = pending + (size_t)chunk * px;
-  for (size_t i = 0; i < chars; i++) {
-    const int v = symVal[(uint8_t)payload[i]];
-    dst[i * 2] = (uint8_t)(v / LEVELS);
-    dst[i * 2 + 1] = (uint8_t)(v % LEVELS);
+  if (triples) {
+    // The last triple carries the pad. Writing it would land in the next
+    // band, so the final group stops at px.
+    for (size_t g = 0, p = 0; g < chars / 2; g++, p += 3) {
+      const int v = symVal[(uint8_t)payload[g * 2]] * 64 + symVal[(uint8_t)payload[g * 2 + 1]];
+      dst[p] = (uint8_t)(v >> 8);
+      if (p + 1 < px) dst[p + 1] = (uint8_t)((v >> 4) & 15);
+      if (p + 2 < px) dst[p + 2] = (uint8_t)(v & 15);
+    }
+    wireLevels = 16;
+  } else {
+    for (size_t i = 0; i < chars; i++) {
+      const int v = symVal[(uint8_t)payload[i]];
+      dst[i * 2] = widen8(v / 8);
+      dst[i * 2 + 1] = widen8(v % 8);
+    }
+    wireLevels = 8;
   }
 
   lastPacketMs = millis();
@@ -476,6 +509,8 @@ inline void appendStatus(String& json) {
   json += chunksSeen;
   json += ",\"dropped\":";
   json += dropped;
+  json += ",\"levels\":";
+  json += (int)wireLevels;
   json += ",\"rowdup\":";
   json += dupCount;
   json += ",\"rowdupfirst\":";
