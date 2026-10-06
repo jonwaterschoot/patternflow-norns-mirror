@@ -17,3 +17,6 @@ patternflow_secrets.h
 __pycache__/
 *.pyc
 .DS_Store
+
+# Staged releases (tools/release.sh). The assets go to GitHub, not into git.
+dist/
