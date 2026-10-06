@@ -95,6 +95,8 @@ changing anything load-bearing.
 ## Layout
 
 ```
+.github/workflows/
+  release.yml            a pushed tag builds both files and opens a draft release
 docs/
   00-install.md          quick install, building it yourself, bring-up, troubleshooting
   01-verified-facts.md   every load-bearing fact, read out of the source, with citations
@@ -147,14 +149,24 @@ is the least obvious thing in this project.
 
 ### Releasing
 
+Set the new version in both `src/patternflow/bundles/norns/overrides.h`
+(`PF_VARIANT_VERSION`) and `src/norns/mod/pf-mirror/lib/mod.lua` (`VERSION`),
+commit, push, then tag:
+
 ```bash
-tools/release.sh v0.5.0          # from a clean, committed tree → dist/v0.5.0/
+git tag v0.6.0 && git push origin v0.6.0
 ```
 
-It runs the tests, builds, refuses an image that carries Wi-Fi credentials
-(after first proving its scanner catches one that does), checks that the
-firmware and the mod both say the version being released, and prints the
-`gh release create` command. It never publishes anything itself.
+GitHub Actions ([release.yml](.github/workflows/release.yml)) builds both files
+on a clean machine and opens a **draft** release. Read the notes, then press
+Publish. A machine that has never seen your Wi-Fi file cannot put it in the
+image.
+
+The workflow runs `tools/release.sh`, which also works locally
+(`tools/release.sh v0.6.0` → `dist/v0.6.0/`, then the `gh release create`
+command it prints). Either way it runs the tests, refuses an image that
+carries Wi-Fi credentials (after first proving its scanner catches one that
+does), and refuses a tag the firmware and the mod do not both carry.
 
 ## Tests
 

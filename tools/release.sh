@@ -59,7 +59,11 @@ if [ -n "$(git -C vendor/patternflow status --porcelain)" ]; then
   exit 1
 fi
 COMMIT="$(git rev-parse --short HEAD)"
-CORE_TAG="$(git -C vendor/patternflow describe --tags --always)"
+# From the define the core stamps into every image, not from `git describe`:
+# a submodule is checked out without its tags on a fresh clone or a CI runner,
+# and describe would then name a bare commit.
+CORE_TAG="v$(sed -n 's/^#define PF_IMPROV_FW_VERSION[[:space:]]*"\([^"]*\)".*/\1/p' "$SKETCH/net_config.h" | head -n1)"
+[ "$CORE_TAG" != "v" ] || { echo "cannot read the core's version from net_config.h" >&2; exit 1; }
 
 # A version-stamped release is never rebuilt in place: whoever downloaded the
 # first one has those bytes, and a second set under the same name is a bug

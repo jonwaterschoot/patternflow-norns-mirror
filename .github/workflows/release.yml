@@ -1,0 +1,77 @@
+# Build a release on a clean machine.
+#
+#   git tag v0.6.0 && git push origin v0.6.0
+#       builds both files and opens a DRAFT release with them. Nothing is
+#       public until you press Publish on GitHub: a staged image nobody has
+#       looked at should not become the thing a stranger flashes.
+#
+#   Actions → release → Run workflow
+#       a dry run of whatever is on the branch: the same build, uploaded as a
+#       workflow artifact, no release.
+#
+# The work is tools/release.sh, the same script as a local release, so the two
+# cannot drift. This machine has never seen a patternflow_secrets.h, which is
+# the point of building here: the credential check still runs, and has nothing
+# to find. The tag has to match PF_VARIANT_VERSION and the mod's VERSION, or
+# release.sh refuses before building anything.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write   # creating the draft release
+
+concurrency:
+  group: release-${{ github.ref }}
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      # The espressif32 platform and its toolchain are a few hundred MB, and
+      # only change when the core's platformio.ini does.
+      - uses: actions/cache@v6
+        with:
+          path: ~/.platformio
+          key: pio-${{ runner.os }}-${{ hashFiles('vendor/patternflow/firmware/patternflow/platformio.ini') }}
+
+      - name: Tools
+        run: pip install platformio lupa
+
+      - name: Which version
+        id: version
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            v="$GITHUB_REF_NAME"
+          else
+            v="$(sed -n 's/^#define PF_VARIANT_VERSION[[:space:]]*"\([^"]*\)".*/\1/p' src/patternflow/bundles/norns/overrides.h)"
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      - name: Build and check
+        run: bash tools/release.sh "${{ steps.version.outputs.version }}"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: patternflow-norns-mirror-${{ steps.version.outputs.version }}
+          path: dist/${{ steps.version.outputs.version }}/
+
+      - name: Draft release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          V: ${{ steps.version.outputs.version }}
+        run: |
+          gh release create "$V" dist/"$V"/assets/* \
+            --draft --title "$V" --notes-file dist/"$V"/notes.md
